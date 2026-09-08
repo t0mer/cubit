@@ -1,0 +1,64 @@
+version: 2
+
+project_name: cubit
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: cubit
+    main: ./cmd/cubit
+    binary: cubit
+    env:
+      # Pure Go, so every target cross-compiles cleanly and the container can
+      # stay on scratch.
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/t0mer/cubit/internal/version.Version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64, arm, "386"]
+    goarm: ["6", "7"]
+    ignore:
+      # Neither macOS nor Windows ships these combinations.
+      - goos: darwin
+        goarch: arm
+      - goos: darwin
+        goarch: "386"
+      - goos: windows
+        goarch: arm
+      - goos: windows
+        goarch: "386"
+
+archives:
+  - id: cubit
+    ids: [cubit]
+    name_template: >-
+      {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      {{- with .Arm }}v{{ . }}{{ end }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+release:
+  draft: false
+  prerelease: auto
