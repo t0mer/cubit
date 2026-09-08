@@ -1,6 +1,6 @@
 module github.com/t0mer/cubit
 
-go 1.25.0
+go 1.25.13
 
 require (
 	github.com/go-chi/chi/v5 v5.3.2
