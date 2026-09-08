@@ -1,0 +1,38 @@
+# Cubit configuration. Copy to config.yaml and mount at /config/config.yaml.
+#
+# Precedence: flags > environment (CUBIT_*) > this file > built-in defaults.
+# Credentials belong in the environment or a mounted secret, NEVER in here.
+
+server:
+  address: ":8080"
+
+pluxee:
+  # Authentication backend (CAPIR).
+  auth_base: "https://api.capir.pluxee.co.il"
+  # Everything else, including balances (the legacy single-endpoint backend).
+  api_base: "https://api.consumers.pluxee.co.il/api/main.py"
+  username: ""      # env: CUBIT_PLUXEE_USERNAME
+  password: ""      # env: CUBIT_PLUXEE_PASSWORD
+  company: ""       # only if your employer's login asks for it
+  restaurant_id: "31999"
+  timeout: "30s"
+  language: "he"
+  # Only needed if Pluxee starts demanding a captcha on login.
+  # See docs/api-notes.md.
+  recaptcha_token: ""
+
+voucher:
+  value_agorot: 5000 # ₪50
+
+auth:
+  autostart: true
+  otp_ttl: "5m"
+  otp_max_attempts: 3
+  encryption_key: ""      # env: CUBIT_AUTH_ENCRYPTION_KEY (32 bytes)
+  encryption_key_file: "" # or a mounted secret file, which wins over the above
+
+data_dir: "/data"
+
+log:
+  level: "info"
+  format: "json"

@@ -1,0 +1,23 @@
+services:
+  cubit:
+    image: techblog/cubit:latest
+    container_name: cubit
+    ports:
+      - "8080:8080"
+    environment:
+      # Credentials come from the environment, never from a committed file.
+      CUBIT_PLUXEE_USERNAME: "${CIBUS_USER}"
+      CUBIT_PLUXEE_PASSWORD: "${CIBUS_PASS}"
+      # 32 bytes: raw, hex or base64. Losing this means re-doing the OTP dance.
+      CUBIT_AUTH_ENCRYPTION_KEY: "${CUBIT_KEY}"
+      CUBIT_LOG_LEVEL: "info"
+      CUBIT_LOG_FORMAT: "json"
+    volumes:
+      # A named volume, not a bind mount: the image runs as uid 10001 and a
+      # root-owned host directory would not be writable, so the encrypted
+      # session could not be saved.
+      - cubit-data:/data
+    restart: unless-stopped
+
+volumes:
+  cubit-data:

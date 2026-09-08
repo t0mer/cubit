@@ -1,0 +1,14 @@
+.git
+.github
+.claude
+CLAUDE.md
+docs
+scans
+dist
+data
+*.md
+!README.md
+*.db
+*.sqlite*
+.env
+.env.*
