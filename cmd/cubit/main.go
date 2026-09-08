@@ -69,6 +69,11 @@ func run(ctx context.Context, configPath string, flags *pflag.FlagSet) error {
 		return fmt.Errorf("configuration is not usable: %w", err)
 	}
 	logger.Info("starting cubit", "version", version.Version)
+	if cfg.Server.APIToken == "" {
+		logger.Warn("no api token configured: /api/v1 and /metrics are open to anyone " +
+			"who can reach this port, which exposes the balance and can trigger an OTP. " +
+			"Set CUBIT_SERVER_API_TOKEN to require one.")
+	}
 	logger.Debug("configuration", "settings", cfg.String())
 
 	key, err := cfg.EncryptionKey()
@@ -119,6 +124,7 @@ func run(ctx context.Context, configPath string, flags *pflag.FlagSet) error {
 		Metrics:      metrics.New(),
 		Logger:       logger,
 		Version:      version.Version,
+		APIToken:     cfg.Server.APIToken,
 		// Stage 1's headline requirement: print the result.
 		OnReport: func(r api.BalanceReport) { fmt.Print(r.Render()) },
 	})

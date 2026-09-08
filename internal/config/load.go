@@ -97,6 +97,7 @@ func Load(path string, fs *pflag.FlagSet) (*Config, error) {
 
 func setDefaults(v *viper.Viper, d *Config) {
 	v.SetDefault("server.address", d.Server.Address)
+	v.SetDefault("server.api_token", d.Server.APIToken)
 	v.SetDefault("pluxee.auth_base", d.Pluxee.AuthBase)
 	v.SetDefault("pluxee.api_base", d.Pluxee.APIBase)
 	v.SetDefault("pluxee.username", d.Pluxee.Username)

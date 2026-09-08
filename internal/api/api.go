@@ -7,6 +7,7 @@ package api
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -36,6 +37,9 @@ type Options struct {
 	Metrics      *metrics.Metrics
 	Logger       *slog.Logger
 	Version      string
+	// APIToken guards /api/v1 and /metrics. When empty the API is open — see
+	// requireToken for why that is the documented first-run behaviour.
+	APIToken string
 	// OnReport, when set, is called with every successful balance report. The
 	// service uses it to print the console block.
 	OnReport func(BalanceReport)
@@ -50,6 +54,7 @@ type Handler struct {
 	metrics      *metrics.Metrics
 	log          *slog.Logger
 	version      string
+	apiToken     string
 	onReport     func(BalanceReport)
 }
 
@@ -72,6 +77,7 @@ func New(opts Options) (*Handler, error) {
 		metrics:      opts.Metrics,
 		log:          opts.Logger,
 		version:      opts.Version,
+		apiToken:     opts.APIToken,
 		onReport:     opts.OnReport,
 	}
 	if h.log == nil {
@@ -90,18 +96,57 @@ func (h *Handler) Routes() http.Handler {
 	r.Use(middleware.Recoverer)
 	r.Use(h.logRequests)
 
+	// Probes stay open: an orchestrator's liveness check cannot carry a token.
 	r.Get("/healthz", h.handleHealthz)
 	r.Get("/readyz", h.handleReadyz)
-	r.Method(http.MethodGet, "/metrics",
-		promhttp.HandlerFor(h.metrics.Registry(), promhttp.HandlerOpts{}))
 
-	r.Route("/api/v1", func(r chi.Router) {
-		r.Post("/auth/login", h.handleLogin)
-		r.Post("/auth/otp", h.handleOTP)
-		r.Get("/auth/status", h.handleAuthStatus)
-		r.Get("/balance", h.handleBalance)
+	// Everything that reads the balance or drives the state machine is guarded.
+	r.Group(func(r chi.Router) {
+		r.Use(h.requireToken)
+		r.Method(http.MethodGet, "/metrics",
+			promhttp.HandlerFor(h.metrics.Registry(), promhttp.HandlerOpts{}))
+		r.Route("/api/v1", func(r chi.Router) {
+			r.Post("/auth/login", h.handleLogin)
+			r.Post("/auth/otp", h.handleOTP)
+			r.Get("/auth/status", h.handleAuthStatus)
+			r.Get("/balance", h.handleBalance)
+		})
 	})
 	return r
+}
+
+// requireToken guards the endpoints that expose the balance or drive the login.
+//
+// The token may be presented as an X-API-Token header or as the password half
+// of Basic Auth. Comparison is constant-time.
+//
+// When no token is configured the API is open. That is deliberate first-run
+// behaviour — the service must be reachable before anything is configured — but
+// it means an unguarded instance exposes the balance and can be made to send the
+// account holder an OTP, so New logs a warning at startup and the README says so.
+func (h *Handler) requireToken(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if h.apiToken == "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		presented := r.Header.Get("X-API-Token")
+		if presented == "" {
+			if _, password, ok := r.BasicAuth(); ok {
+				presented = password
+			}
+		}
+
+		if subtle.ConstantTimeCompare([]byte(presented), []byte(h.apiToken)) != 1 {
+			// Never echo either token back, and give no hint which half failed.
+			writeJSON(w, http.StatusUnauthorized, map[string]string{
+				"error": "a valid X-API-Token header or basic-auth password is required",
+			})
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // logRequests logs method, path and status. Bodies are never logged: the OTP

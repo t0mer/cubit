@@ -186,14 +186,37 @@ func TestConfigStringRedactsSecrets(t *testing.T) {
 	c.Pluxee.Password = "hunter2"
 	c.Auth.EncryptionKey = strings.Repeat("s", 32)
 	c.Pluxee.RecaptchaToken = "03AGdBq26..."
+	c.Server.APIToken = "my-api-token"
 
 	printed := c.String()
-	for _, secret := range []string{"hunter2", strings.Repeat("s", 32), "03AGdBq26..."} {
+	for _, secret := range []string{"hunter2", strings.Repeat("s", 32), "03AGdBq26...", "my-api-token"} {
 		if strings.Contains(printed, secret) {
 			t.Errorf("Config.String() leaked %q", secret)
 		}
 	}
 	if !strings.Contains(printed, "alice") {
 		t.Error("Config.String() should still show non-secret settings like the username")
+	}
+}
+
+func TestAPITokenIsUnsetByDefault(t *testing.T) {
+	if got := Default().Server.APIToken; got != "" {
+		t.Errorf("api token default = %q, want empty (open bootstrap mode)", got)
+	}
+}
+
+func TestValidateRejectsAShortAPIToken(t *testing.T) {
+	c := validConfig()
+	c.Server.APIToken = "short"
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate accepted a trivially guessable api token")
+	}
+}
+
+func TestValidateAcceptsAReasonableAPIToken(t *testing.T) {
+	c := validConfig()
+	c.Server.APIToken = strings.Repeat("t", 24)
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate rejected a reasonable api token: %v", err)
 	}
 }

@@ -19,6 +19,9 @@ import (
 type Config struct {
 	Server struct {
 		Address string `mapstructure:"address"`
+		// APIToken guards /api/v1 and /metrics. Empty leaves them open, which
+		// is the documented first-run behaviour.
+		APIToken string `mapstructure:"api_token"`
 	} `mapstructure:"server"`
 
 	Pluxee struct {
@@ -119,6 +122,10 @@ func decodeKey(v string) ([]byte, error) {
 		session.KeyLength, session.KeyLength, session.KeyLength*2, len(v))
 }
 
+// MinAPITokenLength is the shortest API token worth having. Anything less is
+// more likely a typo than a secret.
+const MinAPITokenLength = 16
+
 var validLogLevels = map[string]bool{
 	"debug": true, "info": true, "warning": true, "warn": true, "error": true,
 }
@@ -153,6 +160,12 @@ func (c *Config) Validate() error {
 	if f := strings.ToLower(c.Log.Format); f != "json" && f != "text" {
 		return fmt.Errorf("log.format must be json or text; got %q", c.Log.Format)
 	}
+	// An empty token means "open", which is allowed. A short one means the
+	// operator meant to protect the API and did so ineffectively.
+	if t := c.Server.APIToken; t != "" && len(t) < MinAPITokenLength {
+		return fmt.Errorf("server.api_token must be at least %d characters, got %d; "+
+			"leave it empty to run without authentication", MinAPITokenLength, len(t))
+	}
 	if _, err := c.EncryptionKey(); err != nil {
 		return err
 	}
@@ -163,12 +176,14 @@ func (c *Config) Validate() error {
 // Nothing that could authenticate as the user may appear here.
 func (c *Config) String() string {
 	return fmt.Sprintf(
-		"server.address=%s data_dir=%s pluxee.auth_base=%s pluxee.api_base=%s "+
+		"server.address=%s server.api_token=%s data_dir=%s "+
+			"pluxee.auth_base=%s pluxee.api_base=%s "+
 			"pluxee.username=%s pluxee.password=%s pluxee.restaurant_id=%s "+
 			"pluxee.timeout=%s pluxee.recaptcha_token=%s voucher.value_agorot=%d "+
 			"auth.autostart=%t auth.otp_ttl=%s auth.otp_max_attempts=%d "+
 			"auth.encryption_key=%s log.level=%s log.format=%s",
-		c.Server.Address, c.DataDir, c.Pluxee.AuthBase, c.Pluxee.APIBase,
+		c.Server.Address, mask(c.Server.APIToken), c.DataDir,
+		c.Pluxee.AuthBase, c.Pluxee.APIBase,
 		c.Pluxee.Username, mask(c.Pluxee.Password), c.Pluxee.RestaurantID,
 		c.Pluxee.Timeout, mask(c.Pluxee.RecaptchaToken), c.Voucher.ValueAgorot,
 		c.Auth.Autostart, c.Auth.OTPTTL, c.Auth.OTPMaxAttempts,

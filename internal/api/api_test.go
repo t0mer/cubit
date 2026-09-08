@@ -378,3 +378,9 @@ func TestOversizedOTPBodyIsRejected(t *testing.T) {
 		t.Errorf("oversized body = %d, want 400 or 413", w.Code)
 	}
 }
+
+func newRequest(method, path string) *http.Request {
+	return httptest.NewRequest(method, path, nil)
+}
+
+func recorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }
