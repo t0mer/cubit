@@ -1,0 +1,334 @@
+// Package api serves Cubit's HTTP surface: the auth state machine, the balance
+// report, health probes and metrics.
+//
+// Handlers never echo a credential, an OTP code or a token. Errors returned to
+// callers describe what went wrong in terms of state, not in terms of secrets.
+package api
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/go-chi/chi/v5/middleware"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
+	"github.com/t0mer/cubit/internal/metrics"
+	"github.com/t0mer/cubit/internal/pluxee"
+	"github.com/t0mer/cubit/internal/session"
+	"github.com/t0mer/cubit/internal/voucher"
+)
+
+// maxBodyBytes caps request bodies. The only body we accept is a short OTP code.
+const maxBodyBytes = 4 << 10
+
+// Options configures a Handler.
+type Options struct {
+	Sessions     *session.Manager
+	Client       pluxee.API
+	Calculator   *voucher.Calculator
+	RestaurantID string
+	Metrics      *metrics.Metrics
+	Logger       *slog.Logger
+	Version      string
+	// OnReport, when set, is called with every successful balance report. The
+	// service uses it to print the console block.
+	OnReport func(BalanceReport)
+}
+
+// Handler serves the HTTP API.
+type Handler struct {
+	sessions     *session.Manager
+	client       pluxee.API
+	calc         *voucher.Calculator
+	restaurantID string
+	metrics      *metrics.Metrics
+	log          *slog.Logger
+	version      string
+	onReport     func(BalanceReport)
+}
+
+// New returns a Handler.
+func New(opts Options) (*Handler, error) {
+	if opts.Sessions == nil {
+		return nil, fmt.Errorf("api: a session manager is required")
+	}
+	if opts.Client == nil {
+		return nil, fmt.Errorf("api: a pluxee client is required")
+	}
+	if opts.Calculator == nil {
+		return nil, fmt.Errorf("api: a voucher calculator is required")
+	}
+	h := &Handler{
+		sessions:     opts.Sessions,
+		client:       opts.Client,
+		calc:         opts.Calculator,
+		restaurantID: opts.RestaurantID,
+		metrics:      opts.Metrics,
+		log:          opts.Logger,
+		version:      opts.Version,
+		onReport:     opts.OnReport,
+	}
+	if h.log == nil {
+		h.log = slog.Default()
+	}
+	if h.metrics == nil {
+		h.metrics = metrics.New()
+	}
+	return h, nil
+}
+
+// Routes builds the router.
+func (h *Handler) Routes() http.Handler {
+	r := chi.NewRouter()
+	r.Use(middleware.RequestID)
+	r.Use(middleware.Recoverer)
+	r.Use(h.logRequests)
+
+	r.Get("/healthz", h.handleHealthz)
+	r.Get("/readyz", h.handleReadyz)
+	r.Method(http.MethodGet, "/metrics",
+		promhttp.HandlerFor(h.metrics.Registry(), promhttp.HandlerOpts{}))
+
+	r.Route("/api/v1", func(r chi.Router) {
+		r.Post("/auth/login", h.handleLogin)
+		r.Post("/auth/otp", h.handleOTP)
+		r.Get("/auth/status", h.handleAuthStatus)
+		r.Get("/balance", h.handleBalance)
+	})
+	return r
+}
+
+// logRequests logs method, path and status. Bodies are never logged: the OTP
+// endpoint's body is a secret.
+func (h *Handler) logRequests(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+		start := time.Now()
+		next.ServeHTTP(ww, r)
+		h.log.Debug("http request",
+			"method", r.Method, "path", r.URL.Path,
+			"status", ww.Status(), "duration", time.Since(start))
+	})
+}
+
+func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"version": h.version,
+	})
+}
+
+func (h *Handler) handleReadyz(w http.ResponseWriter, r *http.Request) {
+	state := h.sessions.State()
+	h.metrics.SetAuthState(string(state))
+	if state != session.StateAuthenticated {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"status": "not ready",
+			"state":  state,
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "ready", "state": state})
+}
+
+// authStatusBody is the shape returned by the auth endpoints.
+type authStatusBody struct {
+	State             session.State `json:"state"`
+	MaskedTarget      string        `json:"masked_target,omitempty"`
+	DeliveryMethod    string        `json:"delivery_method,omitempty"`
+	AttemptsRemaining int           `json:"attempts_remaining,omitempty"`
+	ExpiresAt         *time.Time    `json:"challenge_expires_at,omitempty"`
+	AuthenticatedAt   *time.Time    `json:"authenticated_at,omitempty"`
+	Message           string        `json:"message,omitempty"`
+}
+
+func statusBody(st session.Status, msg string) authStatusBody {
+	return authStatusBody{
+		State:             st.State,
+		MaskedTarget:      st.MaskedTarget,
+		DeliveryMethod:    st.DeliveryMethod,
+		AttemptsRemaining: st.AttemptsRemaining,
+		ExpiresAt:         st.ChallengeExpiresAt,
+		AuthenticatedAt:   st.AuthenticatedAt,
+		Message:           msg,
+	}
+}
+
+func (h *Handler) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
+	st := h.sessions.Status()
+	h.metrics.SetAuthState(string(st.State))
+	writeJSON(w, http.StatusOK, statusBody(st, ""))
+}
+
+// handleLogin starts a login. A successful start returns 202 with the masked
+// destination the OTP was sent to.
+func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
+	ch, err := h.sessions.Login(r.Context())
+	if err != nil {
+		h.metrics.RecordLogin("error")
+		h.writeAuthError(w, err)
+		return
+	}
+
+	st := h.sessions.Status()
+	h.metrics.SetAuthState(string(st.State))
+	h.metrics.RecordLogin("success")
+
+	if ch == nil {
+		writeJSON(w, http.StatusOK, statusBody(st, "already authenticated, no otp required"))
+		return
+	}
+	writeJSON(w, http.StatusAccepted, statusBody(st, "an otp has been sent; post it to /api/v1/auth/otp"))
+}
+
+// otpRequest is the body of POST /api/v1/auth/otp.
+type otpRequest struct {
+	Code string `json:"code"`
+}
+
+func (h *Handler) handleOTP(w http.ResponseWriter, r *http.Request) {
+	var req otpRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		// Deliberately not echoing the body: it holds the code.
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "request body must be a JSON object of the form {\"code\":\"123456\"}",
+		})
+		return
+	}
+	if req.Code == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "code is required"})
+		return
+	}
+
+	err := h.sessions.SubmitOTP(r.Context(), req.Code)
+	st := h.sessions.Status()
+	h.metrics.SetAuthState(string(st.State))
+
+	if err != nil {
+		h.metrics.RecordOTPSubmission("rejected")
+		h.writeAuthError(w, err)
+		return
+	}
+
+	h.metrics.RecordOTPSubmission("accepted")
+	writeJSON(w, http.StatusOK, statusBody(st, "authenticated"))
+}
+
+// writeAuthError maps a session or client error onto the documented status code.
+func (h *Handler) writeAuthError(w http.ResponseWriter, err error) {
+	st := h.sessions.Status()
+
+	var otpErr *session.OTPRejectedError
+	switch {
+	case errors.As(err, &otpErr):
+		body := statusBody(st, "incorrect code")
+		body.AttemptsRemaining = otpErr.Remaining
+		writeJSON(w, http.StatusUnauthorized, body)
+
+	case errors.Is(err, session.ErrChallengeExpired):
+		writeJSON(w, http.StatusGone, statusBody(st, "the otp challenge expired; start a new login"))
+
+	case errors.Is(err, session.ErrLoginInProgress):
+		writeJSON(w, http.StatusConflict, statusBody(st, "a login is already awaiting an otp"))
+
+	case errors.Is(err, session.ErrNotAwaitingOTP):
+		writeJSON(w, http.StatusConflict, statusBody(st, "no otp is pending; start a login first"))
+
+	case errors.Is(err, pluxee.ErrInvalidCredentials):
+		writeJSON(w, http.StatusUnauthorized, statusBody(st, "pluxee rejected the configured credentials"))
+
+	case errors.Is(err, pluxee.ErrCaptchaRequired):
+		writeJSON(w, http.StatusPreconditionFailed, statusBody(st,
+			"pluxee demanded a reCAPTCHA token; supply one via pluxee.recaptcha_token"))
+
+	case errors.Is(err, pluxee.ErrNoDeliveryTarget):
+		writeJSON(w, http.StatusPreconditionFailed, statusBody(st,
+			"the account has no phone number on file, so no otp can be delivered"))
+
+	default:
+		h.log.Error("authentication failed", "error", err)
+		writeJSON(w, http.StatusBadGateway, statusBody(st, "the pluxee backend could not be reached"))
+	}
+}
+
+// handleBalance fetches the balance and computes the voucher count.
+func (h *Handler) handleBalance(w http.ResponseWriter, r *http.Request) {
+	if state := h.sessions.State(); state != session.StateAuthenticated {
+		h.metrics.SetAuthState(string(state))
+		writeJSON(w, http.StatusServiceUnavailable, statusBody(h.sessions.Status(),
+			"not authenticated; start a login and submit the otp"))
+		return
+	}
+
+	report, err := h.Check(r.Context())
+	if err != nil {
+		if errors.Is(err, pluxee.ErrSessionExpired) {
+			writeJSON(w, http.StatusServiceUnavailable, statusBody(h.sessions.Status(),
+				"the pluxee session expired; start a new login"))
+			return
+		}
+		h.log.Error("balance check failed", "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": "could not fetch the balance from pluxee",
+		})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, report)
+}
+
+// Check fetches the balance, computes the voucher count and reports it.
+//
+// It is exported because the service also calls it outside an HTTP request, on
+// startup, to print the balance block to the console.
+func (h *Handler) Check(ctx context.Context) (BalanceReport, error) {
+	balanceAgorot, err := h.client.Balance(ctx)
+	if err != nil {
+		h.metrics.RecordBalanceCheck("error")
+		if errors.Is(err, pluxee.ErrSessionExpired) {
+			// The session we thought was good is not: drop it so the next
+			// caller is told to log in rather than being handed a stale error.
+			h.sessions.Invalidate()
+			h.metrics.SetAuthState(string(session.StateIdle))
+		}
+		return BalanceReport{}, err
+	}
+
+	now := time.Now()
+	report := newReport(h.calc.Calculate(balanceAgorot), h.restaurantID, now)
+
+	h.metrics.RecordBalanceCheck("success")
+	h.metrics.RecordBalance(report.BalanceAgorot, report.VouchersAffordable)
+	h.metrics.RecordRemainder(report.RemainderAgorot)
+	h.metrics.RecordCheckTime(now.Unix())
+
+	h.log.Info("balance checked",
+		"balance_agorot", report.BalanceAgorot,
+		"voucher_value_agorot", report.VoucherValueAgorot,
+		"vouchers_affordable", report.VouchersAffordable,
+		"remainder_agorot", report.RemainderAgorot,
+		"restaurant_id", report.RestaurantID)
+
+	if h.onReport != nil {
+		h.onReport(report)
+	}
+	return report, nil
+}
+
+// writeJSON writes v as JSON with the given status.
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		// The status is already written, so there is nothing to do but note it.
+		slog.Default().Error("writing json response", "error", err)
+	}
+}
