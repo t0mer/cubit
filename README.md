@@ -89,6 +89,9 @@ All endpoints are JSON. Application routes live under `/api/v1`.
 | `GET`  | `/readyz` | Ready only when `AUTHENTICATED` |
 | `GET`  | `/metrics` | Prometheus |
 
+`/api/v1` and `/metrics` are guarded by `CUBIT_SERVER_API_TOKEN` when it is set;
+`/healthz` and `/readyz` are always open so orchestrator probes keep working.
+
 ### `POST /api/v1/auth/otp`
 
 ```json
@@ -156,6 +159,7 @@ replaced by underscores.
 | `CUBIT_AUTH_AUTOSTART` | `true` | Begin login on boot |
 | `CUBIT_AUTH_OTP_TTL` | `5m` | How long a challenge stays valid |
 | `CUBIT_AUTH_OTP_MAX_ATTEMPTS` | `3` | Wrong codes before a fresh login is needed |
+| `CUBIT_SERVER_API_TOKEN` | — | Guards `/api/v1` and `/metrics`; min 16 chars |
 | `CUBIT_SERVER_ADDRESS` | `:8080` | Listen address |
 | `CUBIT_DATA_DIR` | `/data` | Where the encrypted session lives |
 | `CUBIT_LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` |
@@ -208,6 +212,24 @@ denomination is rejected at startup rather than dividing by zero later.
 | `cubit_otp_submissions_total` | counter | By `result` |
 | `cubit_logins_total` | counter | By `result` |
 
+## Authentication
+
+Set `CUBIT_SERVER_API_TOKEN` and every `/api/v1` and `/metrics` request must
+present it, either way round:
+
+```bash
+curl -H 'X-API-Token: <token>'   http://localhost:8080/api/v1/balance
+curl -u cubit:<token>            http://localhost:8080/api/v1/balance
+```
+
+Comparison is constant-time. `/healthz` and `/readyz` stay open for probes.
+
+**If you do not set a token the API is open**, and Cubit warns about it on every
+start. That is deliberate first-run behaviour — the service has to be reachable
+before it is configured — but an open instance lets anyone who can reach the port
+read your balance and make Pluxee send *you* an OTP. Set a token before exposing
+it beyond localhost.
+
 ## Security
 
 - Credentials, OTP codes and session tokens are **never logged** at any level,
@@ -221,6 +243,11 @@ denomination is rejected at startup rather than dividing by zero later.
   and a retry loop risks a lockout. Backoff with jitter applies only to `429`
   and `5xx`, capped at three attempts, honouring `Retry-After`.
 - OTP submissions are capped (default 3) before a fresh login is required.
+- Because the token is required as a header (or basic-auth), a configured token
+  also closes the cross-site request path that could otherwise make a browser
+  trigger a login.
+- `go.mod` requires Go 1.25.13 or newer, the release that fixed the standard
+  library advisories `govulncheck` reports against older toolchains.
 
 ## A caveat worth reading
 

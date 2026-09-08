@@ -5,6 +5,11 @@
 
 server:
   address: ":8080"
+  # Guards /api/v1 and /metrics via an X-API-Token header or basic-auth
+  # password. Leave empty and they are OPEN to anyone who can reach the port —
+  # which exposes your balance and lets a stranger trigger an OTP to your phone.
+  # At least 16 characters. env: CUBIT_SERVER_API_TOKEN
+  api_token: ""
 
 pluxee:
   # Authentication backend (CAPIR).
