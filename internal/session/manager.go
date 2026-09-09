@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +48,9 @@ var (
 	ErrNotAwaitingOTP = errors.New("session: not awaiting an otp")
 	// ErrChallengeExpired means the challenge outlived its TTL. Mapped to 410.
 	ErrChallengeExpired = errors.New("session: otp challenge expired")
+	// ErrNoCredentials means no Pluxee username and password are held, either
+	// from configuration or from the API. Mapped to 412.
+	ErrNoCredentials = errors.New("session: pluxee credentials are not configured")
 )
 
 // OTPRejectedError is a wrong code, carrying how many attempts are left.
@@ -68,6 +72,8 @@ type Status struct {
 	AttemptsRemaining  int        `json:"attempts_remaining,omitempty"`
 	ChallengeExpiresAt *time.Time `json:"challenge_expires_at,omitempty"`
 	AuthenticatedAt    *time.Time `json:"authenticated_at,omitempty"`
+	// CredentialsConfigured says whether a login could be attempted at all.
+	CredentialsConfigured bool `json:"credentials_configured"`
 }
 
 // Options configures a Manager.
@@ -122,7 +128,7 @@ func NewManager(opts Options) (*Manager, error) {
 		state:       StateIdle,
 		client:      opts.Client,
 		store:       opts.Store,
-		username:    opts.Username,
+		username:    strings.TrimSpace(opts.Username),
 		password:    opts.Password,
 		company:     opts.Company,
 		otpTTL:      opts.OTPTTL,
@@ -159,7 +165,10 @@ func (m *Manager) Status() Status {
 	defer m.mu.Unlock()
 	m.expireChallengeLocked()
 
-	st := Status{State: m.state}
+	st := Status{
+		State:                 m.state,
+		CredentialsConfigured: m.username != "" && m.password != "",
+	}
 	if m.state == StateAwaitingOTP && m.challenge != nil {
 		expiry := m.challengeExpiry
 		st.MaskedTarget = m.challenge.MaskedInput
@@ -218,6 +227,45 @@ func (m *Manager) Restore(ctx context.Context) error {
 // It returns the pending challenge, or nil if the backend authenticated us
 // outright. A login started while another is outstanding returns
 // ErrLoginInProgress rather than silently triggering a second SMS.
+// SetCredentials replaces the Pluxee credentials the next login will use.
+//
+// They are held in memory only and never persisted: a restart drops them, which
+// is the deliberate trade for not keeping a reusable password for a financial
+// account on disk. A restored session on disk still reaches AUTHENTICATED
+// without them.
+//
+// Refused while a challenge is outstanding — swapping credentials mid-flight
+// would silently invalidate the code already in the user's hand.
+func (m *Manager) SetCredentials(username, password, company string) error {
+	username = strings.TrimSpace(username)
+	if username == "" {
+		return fmt.Errorf("session: username is required")
+	}
+	if password == "" {
+		return fmt.Errorf("session: password is required")
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.expireChallengeLocked()
+	if m.state == StateAwaitingOTP {
+		return ErrLoginInProgress
+	}
+
+	m.username = username
+	m.password = password
+	m.company = strings.TrimSpace(company)
+	m.log.Info("pluxee credentials set via the api")
+	return nil
+}
+
+// HasCredentials reports whether a login could be attempted.
+func (m *Manager) HasCredentials() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.username != "" && m.password != ""
+}
+
 func (m *Manager) Login(ctx context.Context) (*pluxee.Challenge, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -227,7 +275,7 @@ func (m *Manager) Login(ctx context.Context) (*pluxee.Challenge, error) {
 		return nil, ErrLoginInProgress
 	}
 	if m.username == "" || m.password == "" {
-		return nil, fmt.Errorf("session: pluxee credentials are not configured")
+		return nil, ErrNoCredentials
 	}
 
 	res, err := m.client.Login(ctx, m.username, m.password, m.company)

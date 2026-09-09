@@ -18,6 +18,8 @@ type fakeAPI struct {
 	loginResult *pluxee.LoginResult
 	loginErr    error
 	loginCalls  int
+	lastUser    string
+	lastPass    string
 
 	otpErr   error
 	otpCalls int
@@ -30,10 +32,12 @@ type fakeAPI struct {
 	cookies []*http.Cookie
 }
 
-func (f *fakeAPI) Login(context.Context, string, string, string) (*pluxee.LoginResult, error) {
+func (f *fakeAPI) Login(_ context.Context, user, pass, _ string) (*pluxee.LoginResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.loginCalls++
+	f.lastUser = user
+	f.lastPass = pass
 	return f.loginResult, f.loginErr
 }
 
@@ -397,5 +401,130 @@ func TestConcurrentLoginsTriggerExactlyOneOTP(t *testing.T) {
 
 	if api.loginCalls != 1 {
 		t.Fatalf("backend login called %d times under concurrency, want exactly 1", api.loginCalls)
+	}
+}
+
+// newManagerNoCredentials builds a manager the way the service starts up when
+// the operator intends to post credentials to the API instead.
+func newManagerNoCredentials(t *testing.T, api *fakeAPI) *Manager {
+	t.Helper()
+	store, err := NewStore(t.TempDir(), testKey(22))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &fakeClock{now: time.Date(2026, 9, 8, 12, 0, 0, 0, time.UTC)}
+	m, err := NewManager(Options{
+		Client: api, Store: store,
+		OTPTTL: 5 * time.Minute, OTPMaxAttempts: 3, Now: clock.Now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return m
+}
+
+func TestLoginWithoutCredentialsReportsErrNoCredentials(t *testing.T) {
+	api := &fakeAPI{loginResult: challengeResult()}
+	m := newManagerNoCredentials(t, api)
+
+	if _, err := m.Login(context.Background()); !errors.Is(err, ErrNoCredentials) {
+		t.Fatalf("Login error = %v, want ErrNoCredentials", err)
+	}
+	if api.loginCalls != 0 {
+		t.Errorf("Login reached the backend %d time(s) with no credentials", api.loginCalls)
+	}
+}
+
+func TestHasCredentialsFollowsWhatIsSet(t *testing.T) {
+	m := newManagerNoCredentials(t, &fakeAPI{loginResult: challengeResult()})
+	if m.HasCredentials() {
+		t.Fatal("HasCredentials = true before any were set")
+	}
+	if err := m.SetCredentials("alice", "secret", ""); err != nil {
+		t.Fatalf("SetCredentials: %v", err)
+	}
+	if !m.HasCredentials() {
+		t.Error("HasCredentials = false after setting a pair")
+	}
+}
+
+func TestSetCredentialsSuppliesTheLogin(t *testing.T) {
+	api := &fakeAPI{loginResult: challengeResult()}
+	m := newManagerNoCredentials(t, api)
+
+	if err := m.SetCredentials("  alice  ", "secret", "acme"); err != nil {
+		t.Fatalf("SetCredentials: %v", err)
+	}
+	if _, err := m.Login(context.Background()); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if api.lastUser != "alice" {
+		t.Errorf("backend saw username %q, want the trimmed %q", api.lastUser, "alice")
+	}
+	if api.lastPass != "secret" {
+		t.Errorf("backend saw password %q", api.lastPass)
+	}
+}
+
+func TestSetCredentialsReplacesTheConfiguredPair(t *testing.T) {
+	api := &fakeAPI{loginResult: challengeResult()}
+	m, _ := newManager(t, api) // starts configured as alice/secret
+
+	if err := m.SetCredentials("bob", "hunter2", ""); err != nil {
+		t.Fatalf("SetCredentials: %v", err)
+	}
+	if _, err := m.Login(context.Background()); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if api.lastUser != "bob" || api.lastPass != "hunter2" {
+		t.Errorf("backend saw %q/%q, want the replacement pair", api.lastUser, api.lastPass)
+	}
+}
+
+func TestSetCredentialsRejectsAHalfSetPair(t *testing.T) {
+	m := newManagerNoCredentials(t, &fakeAPI{})
+	if err := m.SetCredentials("", "secret", ""); err == nil {
+		t.Error("SetCredentials accepted an empty username")
+	}
+	if err := m.SetCredentials("alice", "", ""); err == nil {
+		t.Error("SetCredentials accepted an empty password")
+	}
+	if m.HasCredentials() {
+		t.Error("a rejected pair was stored anyway")
+	}
+}
+
+func TestSetCredentialsRefusedWhileAwaitingOTP(t *testing.T) {
+	api := &fakeAPI{loginResult: challengeResult()}
+	m, _ := newManager(t, api)
+	if _, err := m.Login(context.Background()); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	// Swapping credentials mid-challenge would silently invalidate the code
+	// already sitting in the user's hand.
+	if err := m.SetCredentials("bob", "hunter2", ""); !errors.Is(err, ErrLoginInProgress) {
+		t.Fatalf("SetCredentials error = %v, want ErrLoginInProgress", err)
+	}
+	if err := m.SubmitOTP(context.Background(), "123456"); err != nil {
+		t.Fatalf("the pending challenge should still be answerable: %v", err)
+	}
+}
+
+func TestSetCredentialsAllowedWhileAuthenticated(t *testing.T) {
+	api := &fakeAPI{loginResult: challengeResult()}
+	m, _ := newManager(t, api)
+	if _, err := m.Login(context.Background()); err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+	if err := m.SubmitOTP(context.Background(), "123456"); err != nil {
+		t.Fatalf("SubmitOTP: %v", err)
+	}
+
+	if err := m.SetCredentials("bob", "hunter2", ""); err != nil {
+		t.Fatalf("SetCredentials while authenticated: %v", err)
+	}
+	if got := m.State(); got != StateAuthenticated {
+		t.Errorf("State = %q, want the live session left alone", got)
 	}
 }
