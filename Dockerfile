@@ -4,7 +4,7 @@
 
 # Stage 1: build. Pinned to the build platform so Go cross-compiles natively
 # rather than the whole toolchain running under QEMU emulation.
-FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS builder
 
 WORKDIR /app
 ENV GOTOOLCHAIN=local
