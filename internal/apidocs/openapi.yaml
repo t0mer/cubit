@@ -33,6 +33,8 @@ tags:
     description: The login state machine
   - name: balance
     description: Balance and voucher arithmetic
+  - name: notifications
+    description: Where cubit sends the result of a run
   - name: ops
     description: Probes and metrics
 
@@ -41,6 +43,145 @@ security:
   - basicAuth: []
 
 paths:
+  /api/v1/notifications/:
+    get:
+      tags: [notifications]
+      summary: List notification channels
+      description: |
+        Credentials are redacted in every response: you can see that a token is
+        set, never what it is.
+      responses:
+        "200":
+          description: Every configured channel.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Channel" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+    post:
+      tags: [notifications]
+      summary: Add a notification channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Channel" }
+            examples:
+              greenapi:
+                summary: GreenAPI (WhatsApp cloud)
+                value:
+                  name: "my whatsapp"
+                  provider: greenapi
+                  greenapi:
+                    instance_id: "7103"
+                    token: "your-greenapi-token"
+                    phone: "972501234567"
+                  enabled: true
+                  notify_on_success: true
+                  notify_on_failure: true
+              shoutrrr:
+                summary: Shoutrrr (Slack, Telegram, Gotify, ntfy, SMTP…)
+                value:
+                  name: "gotify"
+                  provider: shoutrrr
+                  shoutrrr: { url: "gotify://hostname/token" }
+                  enabled: true
+                  notify_on_success: true
+              whatsappweb:
+                summary: Self-hosted go-whatsapp-web-multidevice
+                value:
+                  name: "self hosted"
+                  provider: whatsapp_web
+                  whatsapp_web:
+                    base_url: "http://whatsapp:3000"
+                    phone: "972501234567"
+                  enabled: true
+                  notify_on_failure: true
+      responses:
+        "201":
+          description: Created. The response is redacted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "400":
+          description: Malformed body, unknown provider, or a missing required field.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/notifications/test:
+    post:
+      tags: [notifications]
+      summary: Send a real test message
+      description: |
+        Sends using the values in the request **without saving them**, so a
+        configuration can be validated before it is stored.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Channel" }
+      responses:
+        "200":
+          description: The provider accepted the message.
+        "400":
+          description: Malformed body or an incomplete channel.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502":
+          description: The provider rejected it or could not be reached.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/notifications/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        schema: { type: string }
+    put:
+      tags: [notifications]
+      summary: Replace a notification channel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/Channel" }
+      responses:
+        "200":
+          description: Updated. The response is redacted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "400":
+          description: Malformed body or an incomplete channel.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No channel has that id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+    delete:
+      tags: [notifications]
+      summary: Remove a notification channel
+      responses:
+        "204":
+          description: Removed.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No channel has that id.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /healthz:
     get:
       tags: [ops]
@@ -353,6 +494,62 @@ components:
         `IDLE` — nothing in flight.
         `AWAITING_OTP` — a code was sent and is awaited.
         `AUTHENTICATED` — a usable session is held.
+
+    Channel:
+      type: object
+      required: [name, provider]
+      description: |
+        One delivery destination. Credentials are stored AES-256-GCM encrypted
+        alongside the session, and are redacted in every response.
+      properties:
+        id:
+          type: string
+          readOnly: true
+          description: Assigned by cubit.
+        name: { type: string, example: "my whatsapp" }
+        provider:
+          type: string
+          enum: [shoutrrr, greenapi, whatsapp_web]
+        shoutrrr:
+          type: object
+          description: One URL covering Slack, Discord, Telegram, Gotify, SMTP, ntfy and more.
+          properties:
+            url: { type: string, format: password, example: "gotify://hostname/token" }
+          additionalProperties: false
+        greenapi:
+          type: object
+          description: |
+            GreenAPI WhatsApp cloud. Leave `api_url` empty for the default host;
+            GreenAPI assigns instances to clusters, so set it if your console
+            shows one (e.g. https://7103.api.greenapi.com).
+          properties:
+            instance_id: { type: string, example: "7103" }
+            token: { type: string, format: password }
+            phone:
+              type: string
+              description: International format, digits only, no + or spaces.
+              example: "972501234567"
+            api_url: { type: string, example: "https://api.green-api.com" }
+          additionalProperties: false
+        whatsapp_web:
+          type: object
+          description: A self-hosted go-whatsapp-web-multidevice instance.
+          properties:
+            base_url: { type: string, example: "http://whatsapp:3000" }
+            phone: { type: string, example: "972501234567" }
+            username: { type: string }
+            password: { type: string, format: password }
+          additionalProperties: false
+        enabled:
+          type: boolean
+          description: Disable without deleting.
+        notify_on_success:
+          type: boolean
+          description: Send when a balance check succeeds.
+        notify_on_failure:
+          type: boolean
+          description: Send when a run fails, including a partial failure.
+      additionalProperties: false
 
     Error:
       type: object

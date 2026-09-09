@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/t0mer/cubit/internal/metrics"
+	"github.com/t0mer/cubit/internal/notify"
 	"github.com/t0mer/cubit/internal/pluxee"
 	"github.com/t0mer/cubit/internal/session"
 	"github.com/t0mer/cubit/internal/voucher"
@@ -88,9 +89,17 @@ func newServer(t *testing.T, api *fakeAPI) (http.Handler, *session.Manager) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The channel store is configured here so the notification routes are
+	// registered: without it the drift test cannot see them, and undocumented
+	// endpoints would slip through unnoticed.
+	channels, err := notify.NewStore(t.TempDir(), key)
+	if err != nil {
+		t.Fatal(err)
+	}
 	h, err := New(Options{
 		Sessions: mgr, Client: api, Calculator: calc,
 		RestaurantID: "31999", Metrics: metrics.New(), Version: "test",
+		Channels: channels, Notifier: notify.NewNotifier(channels, nil, nil),
 	})
 	if err != nil {
 		t.Fatal(err)

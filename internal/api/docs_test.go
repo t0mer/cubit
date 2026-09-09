@@ -153,9 +153,18 @@ func TestSpecMatchesTheRegisteredRoutes(t *testing.T) {
 		t.Fatalf("parsing the spec: %v", err)
 	}
 
+	// A path item holds operations keyed by http method, plus non-method keys
+	// such as "parameters" and "summary". Only the methods are routes.
+	httpMethods := map[string]bool{
+		"get": true, "put": true, "post": true, "delete": true,
+		"options": true, "head": true, "patch": true, "trace": true,
+	}
 	documented := map[string]bool{}
 	for path, ops := range spec.Paths {
 		for method := range ops {
+			if !httpMethods[strings.ToLower(method)] {
+				continue
+			}
 			documented[strings.ToUpper(method)+" "+path] = true
 		}
 	}

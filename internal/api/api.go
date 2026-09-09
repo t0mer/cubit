@@ -22,6 +22,7 @@ import (
 	"github.com/t0mer/cubit/internal/apidocs"
 
 	"github.com/t0mer/cubit/internal/metrics"
+	"github.com/t0mer/cubit/internal/notify"
 	"github.com/t0mer/cubit/internal/pluxee"
 	"github.com/t0mer/cubit/internal/session"
 	"github.com/t0mer/cubit/internal/voucher"
@@ -50,6 +51,10 @@ type Options struct {
 	// OnReport, when set, is called with every successful balance report. The
 	// service uses it to print the console block.
 	OnReport func(BalanceReport)
+	// Channels and Notifier are optional. With no channel store the
+	// notification endpoints are not routed and nothing is ever sent.
+	Channels *notify.Store
+	Notifier *notify.Notifier
 }
 
 // Handler serves the HTTP API.
@@ -62,6 +67,8 @@ type Handler struct {
 	log          *slog.Logger
 	version      string
 	apiToken     string
+	channels     *notify.Store
+	notifier     *notify.Notifier
 	onReport     func(BalanceReport)
 }
 
@@ -85,6 +92,8 @@ func New(opts Options) (*Handler, error) {
 		log:          opts.Logger,
 		version:      opts.Version,
 		apiToken:     opts.APIToken,
+		channels:     opts.Channels,
+		notifier:     opts.Notifier,
 		onReport:     opts.OnReport,
 	}
 	if h.log == nil {
@@ -126,6 +135,17 @@ func (h *Handler) Routes() http.Handler {
 			r.Post("/auth/otp", h.handleOTP)
 			r.Get("/auth/status", h.handleAuthStatus)
 			r.Get("/balance", h.handleBalance)
+
+			// Notification channels are only routed when a store is configured.
+			if h.channels != nil {
+				r.Route("/notifications", func(r chi.Router) {
+					r.Get("/", h.handleListChannels)
+					r.Post("/", h.handleAddChannel)
+					r.Post("/test", h.handleTestChannel)
+					r.Put("/{id}", h.handleUpdateChannel)
+					r.Delete("/{id}", h.handleDeleteChannel)
+				})
+			}
 		})
 	})
 	return r
@@ -449,6 +469,7 @@ func (h *Handler) Check(ctx context.Context) (BalanceReport, error) {
 	balanceAgorot, err := h.client.Balance(ctx)
 	if err != nil {
 		h.metrics.RecordBalanceCheck("error")
+		h.notify(ctx, notify.Failure, "Cubit could not read the Cibus balance: "+err.Error())
 		if errors.Is(err, pluxee.ErrSessionExpired) {
 			// The session we thought was good is not: drop it so the next
 			// caller is told to log in rather than being handed a stale error.
@@ -476,7 +497,25 @@ func (h *Handler) Check(ctx context.Context) (BalanceReport, error) {
 	if h.onReport != nil {
 		h.onReport(report)
 	}
+	h.notify(ctx, notify.Success, report.Render())
 	return report, nil
+}
+
+// notify sends a run result to the configured channels.
+//
+// It is deliberately fire-and-forget on its own context: the guideline requires
+// that sending never blocks or fails the primary operation, and a caller's
+// request context is cancelled the moment the response is written — which would
+// abort every delivery mid-flight.
+func (h *Handler) notify(_ context.Context, outcome notify.Outcome, message string) {
+	if h.notifier == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), notify.DefaultTimeout)
+		defer cancel()
+		h.notifier.Notify(ctx, outcome, message)
+	}()
 }
 
 // writeJSON writes v as JSON with the given status.
