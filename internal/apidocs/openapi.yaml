@@ -13,6 +13,13 @@ info:
 
         IDLE --login--> AWAITING_OTP --otp--> AUTHENTICATED
 
+    Pluxee also enforces reCAPTCHA on its login endpoint, and its tokens are
+    single-use and short-lived, so **cubit cannot log in unattended**. Day to
+    day this does not bite: a session obtained once is held encrypted at rest
+    and reused across restarts without a new OTP. It matters only when that
+    session finally expires, at which point re-authentication is a manual,
+    browser-assisted act.
+
   license:
     name: Apache-2.0
     url: https://www.apache.org/licenses/LICENSE-2.0
@@ -113,6 +120,18 @@ paths:
         content:
           application/json:
             schema: { $ref: "#/components/schemas/CredentialsRequest" }
+            examples:
+              usual:
+                summary: The usual case — username and password only
+                value:
+                  username: "0501234567"
+                  password: "your-cibus-password"
+              withCompany:
+                summary: Only when the Cibus login screen shows a company field
+                value:
+                  username: "0501234567"
+                  password: "your-cibus-password"
+                  company: "acme"
       responses:
         "204":
           description: |
@@ -145,6 +164,14 @@ paths:
         Triggers the OTP to the account holder. Exactly one login may be in
         flight: a second call while a challenge is outstanding returns `409`
         rather than silently sending another message.
+
+        **Pluxee enforces reCAPTCHA on its login endpoint**, verified against a
+        real account on 2026-09-09: the same credentials return `210` (OTP sent)
+        when a captcha token accompanies them and `401` when one does not.
+        Because reCAPTCHA v3 tokens are single-use and expire in about two
+        minutes, one cannot be captured and reused, so an unattended login will
+        normally fail here with `412`. A session already held in `token.enc` is
+        unaffected — it is reused without logging in again.
       responses:
         "200":
           description: The backend authenticated outright; no OTP is needed.
@@ -159,7 +186,12 @@ paths:
         "401":
           description: |
             Either the request carried no valid API token, or Pluxee rejected
-            the configured credentials.
+            the credentials.
+
+            Note that a credential rejection is only reported when a reCAPTCHA
+            token was actually configured. Without one, Pluxee answers `401` to
+            correct credentials too, so that case is reported as `412` rather
+            than blaming a password that may be perfectly good.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AuthStatus" }
@@ -170,12 +202,26 @@ paths:
               schema: { $ref: "#/components/schemas/AuthStatus" }
         "412":
           description: |
-            No credentials are held, the account has no phone number on file, or
-            Pluxee demanded a reCAPTCHA token.
+            The login could not even be attempted. One of:
+
+            - no credentials are held — post them to `/api/v1/auth/credentials`;
+            - **a reCAPTCHA token is required** and none is configured. This is
+              the expected outcome for an unattended login; re-authentication
+              has to be done with a browser;
+            - the account has no phone number on file, so no OTP can be
+              delivered.
+
+            The `message` field says which.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AuthStatus" }
-        "502": { $ref: "#/components/responses/BadGateway" }
+        "502":
+          description: |
+            The Pluxee backend could not be reached, or it signalled an OTP
+            challenge while withholding the opaque handle needed to answer it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
 
   /api/v1/auth/otp:
     post:
@@ -314,8 +360,15 @@ components:
           description: Cibus / Pluxee password.
         company:
           type: string
-          description: Only if your employer's login asks for it.
-          default: ""
+          description: |
+            **Optional — omit it entirely unless the Cibus login screen actually
+            shows a company field.** Most accounts do not need one; verified
+            against a real account on 2026-09-09 that logging in with no company
+            succeeds.
+
+            Do not try to determine this by calling `/auth/showCompanyField`
+            yourself without a reCAPTCHA token: it answers `true` without one and
+            `false` with one, for the same username.
       additionalProperties: false
 
     OTPRequest:
@@ -357,7 +410,9 @@ components:
           format: date-time
         message:
           type: string
-          description: Human-readable detail. Never contains a credential.
+          description: |
+            Human-readable detail — which precondition failed, how many OTP
+            attempts remain, and so on. Never contains a credential.
       required: [state, credentials_configured]
 
     BalanceReport:
