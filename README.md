@@ -303,6 +303,50 @@ it beyond localhost.
 - `go.mod` requires Go 1.25.13 or newer, the release that fixed the standard
   library advisories `govulncheck` reports against older toolchains.
 
+## Re-authenticating with `cubit-login`
+
+Because Pluxee enforces reCAPTCHA, cubit cannot start a login on its own. The
+`cubit-login` helper does it with a real browser and hands the resulting session
+over. You need this only when the stored session finally expires.
+
+```
+cubit-login --url https://cubit.home --token "$CUBIT_SERVER_API_TOKEN" \
+            --username 0501234567
+```
+
+The password comes from `CUBIT_PLUXEE_PASSWORD` or an interactive prompt, never
+a flag — flags are visible in the process table.
+
+What happens:
+
+1. The helper drives a Chrome you already have installed (it bundles none) and
+   signs in. The browser solves the captcha the ordinary way.
+2. Pluxee sends the one-time code to your phone.
+3. The helper tells cubit to expect it, and cubit accepts it on the usual
+   `POST /api/v1/auth/otp`. **If you have an app that auto-forwards the SMS to
+   that endpoint, nobody types anything.** Otherwise post it yourself.
+4. The helper collects the code from cubit — once — enters it in the browser,
+   and hands the resulting session to `POST /api/v1/auth/session`.
+5. Cubit checks the session works, stores it encrypted, and is authenticated.
+
+| Flag | Purpose |
+|---|---|
+| `--url` | Base URL of the running cubit (default `http://127.0.0.1:8080`) |
+| `--token` | Cubit API token, or `CUBIT_SERVER_API_TOKEN` |
+| `--username` | Cibus username, or `CUBIT_PLUXEE_USERNAME` |
+| `--otp-timeout` | How long to wait for the code (default `5m`) |
+| `--poll-interval` | How often to ask cubit for it (default `2s`) |
+| `--chrome` | Path to a Chrome/Chromium binary |
+| `--headful` | Show the browser, for when the page changes and a step stops matching |
+| `--print` | Print the session instead of sending it, for when the helper cannot reach cubit |
+
+The helper is **not** in the container image — it needs a browser, and cubit
+stays a static binary on `scratch`. It ships as a separate release archive for
+linux, macOS and Windows on amd64 and arm64.
+
+The browser-handoff endpoints refuse to run unless `CUBIT_SERVER_API_TOKEN` is
+set: a session cookie is as good as the password.
+
 ## A caveat worth reading
 
 Pluxee's API is undocumented. Cubit's understanding of it came from reading the
