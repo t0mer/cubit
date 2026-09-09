@@ -112,6 +112,9 @@ func (h *Handler) Routes() http.Handler {
 			promhttp.HandlerFor(h.metrics.Registry(), promhttp.HandlerOpts{}))
 		r.Route("/api/v1", func(r chi.Router) {
 			r.Post("/auth/credentials", h.handleCredentials)
+			r.Post("/auth/browser", h.handleBrowserLogin)
+			r.Get("/auth/browser/otp", h.handleCollectOTP)
+			r.Post("/auth/session", h.handleSessionImport)
 			r.Post("/auth/login", h.handleLogin)
 			r.Post("/auth/otp", h.handleOTP)
 			r.Get("/auth/status", h.handleAuthStatus)
@@ -326,6 +329,15 @@ func (h *Handler) handleOTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.metrics.RecordOTPSubmission("accepted")
+
+	// In a browser-assisted login the code is parked for the helper rather than
+	// submitted, so the machine is still awaiting: say so instead of claiming an
+	// authentication that has not happened yet.
+	if st.State == session.StateAwaitingOTP {
+		writeJSON(w, http.StatusAccepted, statusBody(st,
+			"code received; the browser-assisted login will complete it"))
+		return
+	}
 	writeJSON(w, http.StatusOK, statusBody(st, "authenticated"))
 }
 
