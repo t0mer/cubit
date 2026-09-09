@@ -229,3 +229,28 @@ func TestCredentialsRejectUnknownFields(t *testing.T) {
 		t.Errorf("status = %d, want 400 so a misspelled or unsupported field is not silently ignored", w.Code)
 	}
 }
+
+// The company field is optional, and the OpenAPI examples say so. This locks
+// that in: it is a guard on documented behaviour, not a driver of new
+// behaviour, so it passes the moment it is written.
+func TestCredentialsAcceptedWithNoCompanyField(t *testing.T) {
+	h, mgr, api := newCredentialsServer(t, testToken)
+
+	w := post(t, h, testToken, "/api/v1/auth/credentials",
+		`{"username":"0501234567","password":"secret"}`)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d (%s), want 204 without a company", w.Code, w.Body.String())
+	}
+	if !mgr.HasCredentials() {
+		t.Fatal("credentials were not stored")
+	}
+
+	if lw := post(t, h, testToken, "/api/v1/auth/login", ""); lw.Code != http.StatusAccepted {
+		t.Fatalf("login = %d, want 202", lw.Code)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.lastUser != "0501234567" {
+		t.Errorf("backend saw username %q", api.lastUser)
+	}
+}
