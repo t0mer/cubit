@@ -99,10 +99,19 @@ func (h *Handler) handleSessionImport(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req sessionImportRequest
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSessionBytes))
 	dec.DisallowUnknownFields()
-	// Deliberately not echoing the body: it holds a live session.
-	if err := dec.Decode(&req); err != nil || len(req.Cookies) == 0 {
+	// Deliberately not echoing the body: it holds a live session. The reason is
+	// logged instead, so "too large" and "malformed" are tellable apart without
+	// putting the jar anywhere.
+	if err := dec.Decode(&req); err != nil {
+		h.log.Debug("rejected a session import", "error", err)
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "body must be json carrying a non-empty cookies array",
+		})
+		return
+	}
+	if len(req.Cookies) == 0 {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
 			"error": "body must be json carrying a non-empty cookies array",
 		})

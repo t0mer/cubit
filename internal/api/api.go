@@ -27,8 +27,13 @@ import (
 	"github.com/t0mer/cubit/internal/voucher"
 )
 
-// maxBodyBytes caps request bodies. The only body we accept is a short OTP code.
+// maxBodyBytes caps ordinary request bodies: an OTP code, a credential pair.
 const maxBodyBytes = 4 << 10
+
+// maxSessionBytes caps the session import, which carries a whole cookie jar.
+// A real Pluxee login produced 19 cookies totalling well over 4 KiB, so the
+// ordinary cap rejects every genuine session.
+const maxSessionBytes = 256 << 10
 
 // Options configures a Handler.
 type Options struct {

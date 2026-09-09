@@ -1,6 +1,7 @@
 package api
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -134,5 +135,37 @@ func TestSessionImportNeverEchoesACookieValue(t *testing.T) {
 		if strings.Contains(w.Body.String(), secret) {
 			t.Errorf("response echoed a cookie value: %s", w.Body.String())
 		}
+	}
+}
+
+// A real cookie jar is far bigger than the 4 KiB the OTP endpoint allows: the
+// live login produced 19 cookies, several of them long tokens. Capping the
+// import at the OTP size rejects every genuine session.
+func TestSessionImportAcceptsARealisticCookieJar(t *testing.T) {
+	h, mgr, api := newCredentialsServer(t, testToken)
+	api.mu.Lock()
+	api.balance = 27350
+	api.mu.Unlock()
+
+	var b strings.Builder
+	b.WriteString(`{"cookies":[`)
+	for i := 0; i < 19; i++ {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, `{"name":"c%d","value":"%s","domain":".pluxee.co.il","path":"/"}`,
+			i, strings.Repeat("t", 900))
+	}
+	b.WriteString(`]}`)
+	if b.Len() < 8<<10 {
+		t.Fatalf("test jar is only %d bytes; it must exceed the old 4 KiB cap", b.Len())
+	}
+
+	w := post(t, h, testToken, "/api/v1/auth/session", b.String())
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d (%s), want 204 for a %d-byte jar", w.Code, w.Body.String(), b.Len())
+	}
+	if got := mgr.State(); string(got) != "AUTHENTICATED" {
+		t.Errorf("State = %q, want AUTHENTICATED", got)
 	}
 }
