@@ -155,32 +155,26 @@ documented without existing.
 Returns `503` when not authenticated, with the current state in the body so the
 caller can tell whether an OTP is pending.
 
-### `POST /api/v1/auth/login`
-
-`202` with the masked destination when an OTP was sent, `200` if the backend
-authenticated outright. A second login while one is already pending returns
-`409` — it will not silently send you another SMS. `412` when no credentials are
-held yet.
-
 ### `POST /api/v1/auth/credentials`
 
 ```json
-{ "username": "alice", "password": "secret", "company": "" }
+{ "username": "0501234567", "password": "your-cibus-password" }
 ```
 
-Credentials do not have to come from configuration. Post them here instead and
-cubit will use them for the next login.
-
-`204` on success, with no body — the password is never echoed back, and never
-appears in a log line at any level.
+**This is how you log in.** With a `cubit-login` helper running in watch mode,
+posting credentials is the whole trigger: the helper drives a browser through
+Pluxee's login, and Pluxee texts you a code to submit to `/api/v1/auth/otp`.
 
 | Code | Meaning |
 |---|---|
-| `204` | Stored |
-| `400` | Malformed JSON, or either half of the pair is empty |
-| `409` | A login is awaiting an OTP; answer it or let it expire first |
+| `202` | A login has started; a code is on its way to your phone |
+| `200` | Stored, but a session is already held so nothing will happen |
+| `400` | Malformed JSON, an unrecognised field, or either half of the pair empty |
+| `409` | A login is already awaiting an OTP |
 | `412` | No API token is configured — see below |
 | `401` | An API token is configured and the request did not carry it |
+
+The password is never echoed back and never appears in a log line at any level.
 
 **This endpoint refuses to run on an unguarded instance.** Every other route is
 open when `CUBIT_SERVER_API_TOKEN` is unset, which is deliberate first-run
@@ -189,20 +183,9 @@ is a different proposition — anyone who can reach the port could hand cubit
 their own credentials, and yours would cross the wire unprotected. Set a token
 first.
 
-**Credentials posted here are held in memory only.** They are never written to
-disk, so a restart drops them. The common restart is unaffected: a valid
-`token.enc` still reaches `AUTHENTICATED` with no OTP and no credentials. But if
-the session has expired, you will need to post them again before logging in.
-
-### `POST /api/v1/auth/credentials`
-
-```json
-{ "username": "0501234567", "password": "your-cibus-password" }
-```
-
-`202` when a login has been started — Pluxee is texting you a code; submit it to
-`/api/v1/auth/otp`. `200` when a session is already held, since nothing is going
-to happen. The password is never echoed back and never reaches a log line.
+**Credentials are held in memory only.** They are never written to disk, so a
+restart drops them. The common restart is unaffected: a valid `token.enc` still
+reaches `AUTHENTICATED` with no OTP and no credentials.
 
 ### `POST /api/v1/auth/logout`
 
@@ -376,6 +359,30 @@ What happens:
 | `--chrome` | Path to a Chrome/Chromium binary |
 | `--headful` | Show the browser, for when the page changes and a step stops matching |
 | `--print` | Print the session instead of sending it, for when the helper cannot reach cubit |
+
+### How long it takes
+
+Measured end to end against a real account on 2026-09-09:
+
+| Step | Time |
+|---|---|
+| `POST /auth/credentials` → SMS sent | ~10s |
+| `POST /auth/otp` → `AUTHENTICATED` | ~6s |
+| `GET /balance` | <1s |
+
+About sixteen seconds of machine time, plus however long it takes you to read
+the text message.
+
+That time is real work, not waiting: Chromium cold-starts, the Angular login
+page loads, the two-step form is filled, and Pluxee answers each call. Roughly
+three to four seconds of the first leg is browser startup alone. Keeping a
+browser warm between logins would shave that, at the cost of a Chromium sitting
+idle on the machine holding your meal-card credentials — a poor trade for
+something you do about as often as a session expires.
+
+Every step waits for the page to be ready rather than sleeping for a fixed
+guess, so a slow day costs a little more and a fast one costs less, instead of
+always costing the worst case.
 
 The helper is **not** in the container image — it needs a browser, and cubit
 stays a static binary on `scratch`. It ships as a separate release archive for
