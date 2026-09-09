@@ -274,7 +274,16 @@ func (h *Handler) handleCredentials(w http.ResponseWriter, r *http.Request) {
 
 	switch err := h.sessions.SetCredentials(req.Username, req.Password, req.Company); {
 	case err == nil:
-		w.WriteHeader(http.StatusNoContent)
+		// An empty 204 reads as "nothing happened", which is the opposite of
+		// the truth when this call is what starts a login. Say which it is.
+		st := h.sessions.Status()
+		if st.State == session.StateAuthenticated {
+			writeJSON(w, http.StatusOK, statusBody(st,
+				"already authenticated; the credentials are stored for the next login"))
+			return
+		}
+		writeJSON(w, http.StatusAccepted, statusBody(st,
+			"a one-time code is being sent to your phone; submit it to /api/v1/auth/otp"))
 	case errors.Is(err, session.ErrLoginInProgress):
 		writeJSON(w, http.StatusConflict, statusBody(h.sessions.Status(),
 			"a login is awaiting an otp; answer or let it expire before changing credentials"))
@@ -374,6 +383,14 @@ func (h *Handler) writeAuthError(w http.ResponseWriter, err error) {
 			"no pluxee credentials are configured; post them to /api/v1/auth/credentials"))
 
 	case errors.Is(err, session.ErrNotAwaitingOTP):
+		// Telling an authenticated caller to "start a login first" — in the same
+		// response that reports AUTHENTICATED — reads as a failure when the
+		// login has in fact already succeeded.
+		if st.State == session.StateAuthenticated {
+			writeJSON(w, http.StatusConflict, statusBody(st,
+				"already authenticated; no code is needed"))
+			return
+		}
 		writeJSON(w, http.StatusConflict, statusBody(st, "no otp is pending; start a login first"))
 
 	case errors.Is(err, pluxee.ErrInvalidCredentials):

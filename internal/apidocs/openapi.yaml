@@ -146,10 +146,24 @@ paths:
                   password: "your-cibus-password"
                   company: "acme"
       responses:
-        "204":
+        "202":
           description: |
-            Stored. The body is empty: the password is never echoed back, and
-            never appears in a log line at any level.
+            A login has been started. Pluxee is sending a one-time code to the
+            account holder's phone; submit it to `/api/v1/auth/otp`.
+
+            The body never carries the password back, and the password never
+            appears in a log line at any level.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "200":
+          description: |
+            Stored, but nothing is happening: a session is already held, so
+            there is nothing to log in for. The credentials will be used by the
+            next login.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
         "400":
           description: |
             Malformed JSON, an unrecognised field, a body over 4 KiB, or either
@@ -247,7 +261,10 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AuthStatus" }
         "409":
-          description: No OTP is pending; start a login first.
+          description: |
+            No OTP is pending. Either no login has been started, or one already
+            succeeded — the `message` says which, and `state` tells you plainly.
+            Posting a code twice lands here, and is harmless.
           content:
             application/json:
               schema: { $ref: "#/components/schemas/AuthStatus" }

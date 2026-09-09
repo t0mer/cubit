@@ -247,7 +247,7 @@ func TestLoginRequestHandedToAWaitingHelper(t *testing.T) {
 	}
 
 	if w := post(t, h, testToken, "/api/v1/auth/credentials",
-		`{"username":"alice","password":"secret","company":"acme"}`); w.Code != http.StatusNoContent {
+		`{"username":"alice","password":"secret","company":"acme"}`); w.Code != http.StatusAccepted {
 		t.Fatalf("setting credentials = %d", w.Code)
 	}
 

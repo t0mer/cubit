@@ -194,6 +194,16 @@ disk, so a restart drops them. The common restart is unaffected: a valid
 `token.enc` still reaches `AUTHENTICATED` with no OTP and no credentials. But if
 the session has expired, you will need to post them again before logging in.
 
+### `POST /api/v1/auth/credentials`
+
+```json
+{ "username": "0501234567", "password": "your-cibus-password" }
+```
+
+`202` when a login has been started — Pluxee is texting you a code; submit it to
+`/api/v1/auth/otp`. `200` when a session is already held, since nothing is going
+to happen. The password is never echoed back and never reaches a log line.
+
 ### `POST /api/v1/auth/logout`
 
 Revokes the session at Pluxee — the same call the web app makes when you sign

@@ -94,11 +94,12 @@ func TestCredentialsAreAcceptedAndDriveTheLogin(t *testing.T) {
 	w := post(t, h, testToken, "/api/v1/auth/credentials",
 		`{"username":"alice","password":"secret","company":"acme"}`)
 
-	if w.Code != http.StatusNoContent {
-		t.Fatalf("status = %d (%s), want 204", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d (%s), want 202", w.Code, w.Body.String())
 	}
-	if body := strings.TrimSpace(w.Body.String()); body != "" {
-		t.Errorf("body = %q, want empty", body)
+	// The body says a code is coming; it must never carry the password back.
+	if body := w.Body.String(); strings.Contains(body, "secret") {
+		t.Errorf("response echoed the password: %s", body)
 	}
 	if !mgr.HasCredentials() {
 		t.Fatal("credentials were not stored")
@@ -140,7 +141,7 @@ func TestCredentialsRefusedWhileAwaitingOTP(t *testing.T) {
 	h, _, _ := newCredentialsServer(t, testToken)
 
 	if w := post(t, h, testToken, "/api/v1/auth/credentials",
-		`{"username":"alice","password":"secret"}`); w.Code != http.StatusNoContent {
+		`{"username":"alice","password":"secret"}`); w.Code != http.StatusAccepted {
 		t.Fatalf("setting credentials = %d", w.Code)
 	}
 	if w := post(t, h, testToken, "/api/v1/auth/login", ""); w.Code != http.StatusAccepted {
@@ -184,7 +185,7 @@ func TestAuthStatusReportsWhetherCredentialsAreConfigured(t *testing.T) {
 	}
 
 	if cw := post(t, h, testToken, "/api/v1/auth/credentials",
-		`{"username":"alice","password":"secret"}`); cw.Code != http.StatusNoContent {
+		`{"username":"alice","password":"secret"}`); cw.Code != http.StatusAccepted {
 		t.Fatalf("setting credentials = %d", cw.Code)
 	}
 
@@ -238,7 +239,7 @@ func TestCredentialsAcceptedWithNoCompanyField(t *testing.T) {
 
 	w := post(t, h, testToken, "/api/v1/auth/credentials",
 		`{"username":"0501234567","password":"secret"}`)
-	if w.Code != http.StatusNoContent {
+	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d (%s), want 204 without a company", w.Code, w.Body.String())
 	}
 	if !mgr.HasCredentials() {
@@ -252,5 +253,70 @@ func TestCredentialsAcceptedWithNoCompanyField(t *testing.T) {
 	defer api.mu.Unlock()
 	if api.lastUser != "0501234567" {
 		t.Errorf("backend saw username %q", api.lastUser)
+	}
+}
+
+// A 204 with an empty body is indistinguishable from nothing happening, which
+// is exactly how it read in Swagger. Posting credentials starts a real login,
+// so say so.
+func TestCredentialsReportThatALoginIsStarting(t *testing.T) {
+	h, _, _ := newCredentialsServer(t, testToken)
+
+	w := post(t, h, testToken, "/api/v1/auth/credentials",
+		`{"username":"alice","password":"secret"}`)
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 when a login is being started", w.Code)
+	}
+	msg, _ := decode(t, w)["message"].(string)
+	if !strings.Contains(msg, "/api/v1/auth/otp") {
+		t.Errorf("message %q should say where to send the code", msg)
+	}
+}
+
+// With a session already held nothing is going to happen, and saying "a code is
+// coming" would be a lie.
+func TestCredentialsSayNothingHappensWhenAuthenticated(t *testing.T) {
+	h, _, api := newCredentialsServer(t, testToken)
+	api.mu.Lock()
+	api.balance = 27350
+	api.mu.Unlock()
+	if w := post(t, h, testToken, "/api/v1/auth/session",
+		`{"cookies":[{"name":"t","value":"v"}]}`); w.Code != http.StatusNoContent {
+		t.Fatalf("setup: %d", w.Code)
+	}
+
+	w := post(t, h, testToken, "/api/v1/auth/credentials",
+		`{"username":"alice","password":"secret"}`)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 when nothing will happen", w.Code)
+	}
+	msg, _ := decode(t, w)["message"].(string)
+	if !strings.Contains(strings.ToLower(msg), "already authenticated") {
+		t.Errorf("message %q should say a session is already held", msg)
+	}
+}
+
+// The old message told an authenticated caller to "start a login first", in the
+// same response that reported state AUTHENTICATED.
+func TestDuplicateOTPWhileAuthenticatedSaysSo(t *testing.T) {
+	h, _, api := newCredentialsServer(t, testToken)
+	api.mu.Lock()
+	api.balance = 27350
+	api.mu.Unlock()
+	if w := post(t, h, testToken, "/api/v1/auth/session",
+		`{"cookies":[{"name":"t","value":"v"}]}`); w.Code != http.StatusNoContent {
+		t.Fatalf("setup: %d", w.Code)
+	}
+
+	w := post(t, h, testToken, "/api/v1/auth/otp", `{"code":"123456"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", w.Code)
+	}
+	msg, _ := decode(t, w)["message"].(string)
+	if strings.Contains(msg, "start a login") {
+		t.Errorf("message %q tells an authenticated caller to log in", msg)
+	}
+	if !strings.Contains(strings.ToLower(msg), "already authenticated") {
+		t.Errorf("message %q should say the login already succeeded", msg)
 	}
 }
