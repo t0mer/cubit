@@ -358,7 +358,12 @@ func (h *Handler) writeAuthError(w http.ResponseWriter, err error) {
 
 	case errors.Is(err, pluxee.ErrCaptchaRequired):
 		writeJSON(w, http.StatusPreconditionFailed, statusBody(st,
-			"pluxee demanded a reCAPTCHA token; supply one via pluxee.recaptcha_token"))
+			"pluxee requires a reCAPTCHA token to log in, and it cannot be minted "+
+				"outside a browser; see the re-authentication section of the README"))
+
+	case errors.Is(err, pluxee.ErrIncompleteChallenge):
+		writeJSON(w, http.StatusBadGateway, statusBody(st,
+			"pluxee signalled an otp challenge but withheld its handle; the login cannot continue"))
 
 	case errors.Is(err, pluxee.ErrNoDeliveryTarget):
 		writeJSON(w, http.StatusPreconditionFailed, statusBody(st,
