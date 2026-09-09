@@ -89,6 +89,8 @@ All endpoints are JSON. Application routes live under `/api/v1`.
 | `GET`  | `/readyz` | Ready only when `AUTHENTICATED` |
 | `POST` | `/api/v1/auth/logout` | End the session, at Pluxee and locally |
 | `GET`  | `/metrics` | Prometheus |
+| `GET`  | `/api/v1/notifications` | List, add, update, delete channels |
+| `POST` | `/api/v1/notifications/test` | Send a real test message |
 | `GET`  | `/api/docs` | Swagger UI |
 
 Logging in is two calls: post your credentials, then post the code Pluxee texts
@@ -201,6 +203,68 @@ working long after you thought you had logged out.
 
 Idempotent — logging out with nothing held is a success, and sends nothing
 upstream.
+
+## Notifications
+
+Cubit reports every run to channels you configure. Three providers:
+
+| Provider | Fields |
+|---|---|
+| `shoutrrr` | One `url` — Slack, Discord, Telegram, Gotify, SMTP, ntfy and more |
+| `greenapi` | `instance_id`, `token`, `phone`, optional `api_url` |
+| `whatsapp_web` | `base_url`, `phone`, optional `username`/`password` |
+
+Add one:
+
+```bash
+curl -X POST http://cubit:8080/api/v1/notifications \
+  -H "X-API-Token: $CUBIT_SERVER_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{
+        "name": "my whatsapp",
+        "provider": "greenapi",
+        "greenapi": {
+          "instance_id": "7103",
+          "token": "your-greenapi-token",
+          "phone": "972501234567"
+        },
+        "enabled": true,
+        "notify_on_success": true,
+        "notify_on_failure": true
+      }'
+```
+
+`POST /api/v1/notifications/test` sends a real message using the values in the
+request **without saving them**, so a configuration can be checked before it is
+stored.
+
+**GreenAPI notes**, which account for most of its opaque `400`s: the phone is
+international format with digits only — `972501234567`, not `+972 50 1234567` —
+and every field is trimmed, because whitespace in a token or instance id
+corrupts the request URL. Leave `api_url` empty for the default host; set it if
+your console shows a cluster such as `https://7103.api.greenapi.com`.
+
+### When they fire
+
+After every balance check. A success goes to channels with
+`notify_on_success`, a failure to those with `notify_on_failure`. **A completed
+login triggers a check by itself**, so the whole flow is:
+
+```
+POST /api/v1/auth/credentials   →  helper logs in, Pluxee texts you
+POST /api/v1/auth/otp           →  login completes
+                                →  balance read, notification sent
+```
+
+Delivery is best effort and runs off the request path: a dead provider is
+logged and never costs you a balance read.
+
+### At rest
+
+Channels live in `${DATA_DIR}/channels.enc`, AES-256-GCM under the same key as
+the session. Credentials are redacted in every API response — you can see that a
+token is set, never what it is — and never appear in a log line. Persist that
+volume: it holds your provider tokens as well as the session.
 
 ## Configuration
 

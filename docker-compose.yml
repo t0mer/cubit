@@ -16,6 +16,11 @@ services:
       # A named volume, not a bind mount: the image runs as uid 10001 and a
       # root-owned host directory would not be writable, so the encrypted
       # session could not be saved.
+      #
+      # This volume holds token.enc (the Pluxee session) and channels.enc (your
+      # notification provider tokens). Both are encrypted with
+      # CUBIT_AUTH_ENCRYPTION_KEY; losing either the volume or the key means
+      # reconfiguring.
       - cubit-data:/data
     restart: unless-stopped
 
