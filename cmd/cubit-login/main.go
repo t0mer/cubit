@@ -45,6 +45,7 @@ func run() error {
 		headful    = pflag.Bool("headful", false, "show the browser window, for debugging a changed page")
 		noSandbox  = pflag.Bool("no-sandbox", false, "disable Chrome's sandbox; needed only when running as root, e.g. in a container")
 		printOnly  = pflag.Bool("print", false, "print the captured session instead of sending it to cubit")
+		watch      = pflag.Bool("watch", false, "stay running and log in whenever credentials are posted to cubit")
 		showVer    = pflag.Bool("version", false, "print the version and exit")
 	)
 	pflag.Parse()
@@ -61,6 +62,16 @@ func run() error {
 	if *username == "" {
 		*username = os.Getenv("CUBIT_PLUXEE_USERNAME")
 	}
+	// In watch mode the credentials come from cubit, handed over when someone
+	// posts them to /api/v1/auth/credentials. There is nothing to supply here.
+	if *watch {
+		if *token == "" {
+			return fmt.Errorf("cubit's api token is required (--token or CUBIT_SERVER_API_TOKEN)")
+		}
+		return watchLoop(*cubitURL, *token, *chromePath, *headful, *noSandbox,
+			*otpWait, *pollEvery)
+	}
+
 	if strings.TrimSpace(*username) == "" {
 		return fmt.Errorf("a username is required (--username or CUBIT_PLUXEE_USERNAME)")
 	}

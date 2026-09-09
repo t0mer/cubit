@@ -132,3 +132,38 @@ func TestHandOverSessionSurfacesARejection(t *testing.T) {
 		t.Fatalf("error = %v, want the rejection surfaced", err)
 	}
 }
+
+func TestWaitForLoginRequestPollsUntilOneAppears(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls < 3 {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"username":"alice","password":"secret","company":"acme"}`)
+	}))
+	defer srv.Close()
+
+	req, err := newCubitClient(srv.URL, "tok").waitForLoginRequest(context.Background(), time.Millisecond)
+	if err != nil {
+		t.Fatalf("waitForLoginRequest: %v", err)
+	}
+	if req.Username != "alice" || req.Password != "secret" || req.Company != "acme" {
+		t.Errorf("request = %+v", req)
+	}
+}
+
+func TestWaitForLoginRequestRejectsAnIncompleteOne(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, `{"username":"alice"}`)
+	}))
+	defer srv.Close()
+
+	if _, err := newCubitClient(srv.URL, "tok").waitForLoginRequest(
+		context.Background(), time.Millisecond); err == nil {
+		t.Fatal("accepted a request with no password")
+	}
+}

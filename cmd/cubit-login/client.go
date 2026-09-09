@@ -163,3 +163,52 @@ func firstLine(b []byte) string {
 	}
 	return s
 }
+
+// loginRequest is a pending browser-login handed over by cubit.
+type loginRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Company  string `json:"company"`
+}
+
+// waitForLoginRequest polls until cubit reports that a login is wanted.
+//
+// This is watch mode: rather than the operator running the helper, the helper
+// waits and reacts to a POST to /api/v1/auth/credentials.
+func (c *cubitClient) waitForLoginRequest(ctx context.Context, every time.Duration) (loginRequest, error) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+
+	for {
+		status, body, err := c.do(ctx, http.MethodGet, "/api/v1/auth/login-request", nil)
+		if err != nil {
+			return loginRequest{}, err
+		}
+		switch status {
+		case http.StatusOK:
+			var req loginRequest
+			if err := json.Unmarshal(body, &req); err != nil {
+				return loginRequest{}, fmt.Errorf("decoding the login request: %w", err)
+			}
+			if req.Username == "" || req.Password == "" {
+				return loginRequest{}, fmt.Errorf("cubit handed over an incomplete login request")
+			}
+			return req, nil
+		case http.StatusNoContent:
+			// nothing wanted yet
+		case http.StatusPreconditionFailed:
+			return loginRequest{}, fmt.Errorf("cubit has no api token configured, so browser handoff is disabled")
+		case http.StatusUnauthorized:
+			return loginRequest{}, fmt.Errorf("cubit rejected the api token")
+		default:
+			return loginRequest{}, fmt.Errorf("polling for a login request: cubit returned %d: %s",
+				status, firstLine(body))
+		}
+
+		select {
+		case <-ctx.Done():
+			return loginRequest{}, ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
