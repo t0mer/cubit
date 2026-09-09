@@ -309,12 +309,26 @@ Pluxee's API is undocumented. Cubit's understanding of it came from reading the
 shipped web app and probing the live endpoints; the notes are in
 `docs/api-notes.md` (kept out of git as a local working document).
 
-One finding matters operationally: the login endpoint appeared **not** to enforce
-reCAPTCHA when probed, while the separate "send OTP" endpoint definitely does.
-Cubit's flow only uses the former, so unattended login should work — but that
-could not be proven without a real account, and Pluxee could change it. If login
-ever starts failing with a captcha error, Cubit reports `412` and says so; supply
-a token captured from a browser session via `CUBIT_PLUXEE_RECAPTCHA_TOKEN`.
+**One finding governs how Cubit can be operated: the login endpoint enforces
+reCAPTCHA.** This was confirmed on 2026-09-09 against a real account. The same
+username and password return `210` (OTP sent) from a browser that supplies a
+captcha token, and `401` from a plain HTTP client that does not. The endpoint
+never mentions the captcha — it answers a bare `401`, indistinguishable from a
+wrong password.
+
+Because reCAPTCHA v3 tokens are single-use and expire in about two minutes,
+there is no way to capture one and reuse it. `CUBIT_PLUXEE_RECAPTCHA_TOKEN`
+exists, but a token pasted into configuration is almost certainly dead before
+it is read.
+
+**So Cubit cannot log in unattended.** What it does instead:
+
+- A session, once obtained, is held and re-used — encrypted at rest in
+  `token.enc`. Day to day, restarts need no OTP and no captcha.
+- Re-authentication, when a session finally expires, is a manual act performed
+  with a browser.
+- When a login fails for want of a captcha, Cubit returns `412` and says so,
+  rather than blaming your password.
 
 Cubit does not solve, bypass, or outsource captchas.
 
