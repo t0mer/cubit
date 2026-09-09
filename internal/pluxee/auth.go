@@ -40,17 +40,20 @@ func (c *Client) Login(ctx context.Context, username, password, company string) 
 		if res.Data.MaskedInput == "" {
 			return nil, ErrNoDeliveryTarget
 		}
+		// userInput1 is an opaque, server-issued handle for this challenge — a
+		// 24-character hex string, nothing like the username. Substituting the
+		// username would build a malformed OTP submission that fails for a
+		// reason nobody could diagnose, so refuse instead.
+		if res.Data.UserInput1 == "" {
+			return nil, ErrIncompleteChallenge
+		}
 		ch := &Challenge{
 			UserInput1:  res.Data.UserInput1,
 			UserInput2:  res.Data.UserInput2,
 			MaskedInput: res.Data.MaskedInput,
 			Method:      res.Data.Method,
 		}
-		// The backend does not always echo the identifiers back; falling back to
-		// what we sent keeps the OTP submission well-formed.
-		if ch.UserInput1 == "" {
-			ch.UserInput1 = username
-		}
+		// userInput2 carries the company, which the SPA sends back verbatim.
 		if ch.UserInput2 == "" {
 			ch.UserInput2 = company
 		}
@@ -66,6 +69,16 @@ func (c *Client) Login(ctx context.Context, username, password, company string) 
 		return nil, ErrCaptchaRequired
 
 	case res.Status == http.StatusUnauthorized || res.Status == http.StatusForbidden:
+		// A 401 here is ambiguous, and guessing wrong wastes the user's time.
+		// Verified live on 2026-09-09: the backend answers 401 to a correct
+		// username and password when no reCAPTCHA token is sent, and 210 to the
+		// same credentials when one is. It never says "captcha" on this
+		// endpoint — unlike /auth/sendOTP, which does. So with no token
+		// configured, captcha is the likelier explanation by far; only call it
+		// bad credentials when a token was actually supplied.
+		if c.recaptchaToken == "" {
+			return nil, ErrCaptchaRequired
+		}
 		return nil, ErrInvalidCredentials
 
 	default:

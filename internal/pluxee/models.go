@@ -17,6 +17,12 @@ var (
 	ErrCaptchaRequired = errors.New("pluxee: recaptcha token required")
 	// ErrSessionExpired means the session cookie is missing or no longer valid.
 	ErrSessionExpired = errors.New("pluxee: session expired")
+	// ErrIncompleteChallenge means the backend signalled an OTP challenge but
+	// withheld the opaque handle needed to answer it. Verified live: userInput1
+	// is a server-issued identifier (a 24-character hex string), not the
+	// username, so there is nothing sensible to substitute.
+	ErrIncompleteChallenge = errors.New("pluxee: otp challenge is missing its userInput1 handle")
+
 	// ErrNoDeliveryTarget means the account has no phone number on file, so no
 	// OTP can be delivered and login cannot proceed.
 	ErrNoDeliveryTarget = errors.New("pluxee: account has no otp delivery target")

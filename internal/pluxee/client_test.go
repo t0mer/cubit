@@ -109,7 +109,8 @@ func TestLoginOTPRequiredReturnsChallenge(t *testing.T) {
 // The status can arrive in the JSON body rather than the HTTP status line.
 func TestLoginReadsStatusFromBodyWhenHTTPIs200(t *testing.T) {
 	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"status":210,"data":{"maskedInput":"05*-***9999","method":"sms"}}`)
+		io.WriteString(w, `{"status":210,"data":{"maskedInput":"05*-***9999",`+
+			`"userInput1":"6aa15a3ce420d57d9b990ff4","method":"phone"}}`)
 	}, nil)
 
 	res, err := c.Login(context.Background(), "alice", "secret", "")
@@ -144,6 +145,9 @@ func TestLoginBadCredentials(t *testing.T) {
 		w.WriteHeader(http.StatusUnauthorized)
 		io.WriteString(w, `{"status":401,"error":{"code":"Unauthorized","message":"Unauthorized"}}`)
 	}, nil)
+	// Without a token configured a 401 means "captcha", not "wrong password" —
+	// see TestLoginWithoutACaptchaTokenReportsCaptchaNotBadCredentials.
+	c.recaptchaToken = "a-browser-minted-token"
 
 	_, err := c.Login(context.Background(), "alice", "wrong", "")
 	if !errors.Is(err, ErrInvalidCredentials) {
