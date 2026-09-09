@@ -140,3 +140,27 @@ func TestAdoptSessionRejectsNoCookies(t *testing.T) {
 		t.Fatal("AdoptSession accepted an empty cookie jar")
 	}
 }
+
+// Arming the relay while a good session is held used to discard it: the state
+// moved to AWAITING_OTP, so the balance started failing even though the cookies
+// were still valid. A stray call must not cost a working session.
+func TestExpectExternalOTPRefusedWhileAuthenticated(t *testing.T) {
+	api := &fakeAPI{loginResult: challengeResult()}
+	m, _ := newManager(t, api)
+	if _, err := m.Login(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.SubmitOTP(context.Background(), "123456"); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.State(); got != StateAuthenticated {
+		t.Fatalf("setup failed: state = %q", got)
+	}
+
+	if err := m.ExpectExternalOTP("05*-***1865", "sms"); !errors.Is(err, ErrAlreadyAuthenticated) {
+		t.Fatalf("error = %v, want ErrAlreadyAuthenticated", err)
+	}
+	if got := m.State(); got != StateAuthenticated {
+		t.Errorf("state = %q; the live session must survive", got)
+	}
+}

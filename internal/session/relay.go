@@ -15,6 +15,11 @@ import (
 // read failed, so it is rejected instead. Mapped to 400.
 var ErrSessionNotUsable = errors.New("session: the supplied session is not usable")
 
+// ErrAlreadyAuthenticated means a login was started while a usable session is
+// already held. Arming the relay would move the machine out of AUTHENTICATED
+// and strand a session that still works, so it is refused. Mapped to 409.
+var ErrAlreadyAuthenticated = errors.New("session: already authenticated")
+
 // ExpectExternalOTP arms the machine for a login being driven elsewhere.
 //
 // Pluxee enforces reCAPTCHA on both halves of its login — the credential post
@@ -31,6 +36,12 @@ func (m *Manager) ExpectExternalOTP(maskedTarget, method string) error {
 
 	if m.state == StateAwaitingOTP {
 		return ErrLoginInProgress
+	}
+	// A held session is worth more than a new login: discarding it here would
+	// force an OTP the user did not need. Invalidate deliberately if you really
+	// want to start over.
+	if m.state == StateAuthenticated {
+		return ErrAlreadyAuthenticated
 	}
 
 	m.state = StateAwaitingOTP

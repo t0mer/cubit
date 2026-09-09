@@ -169,3 +169,23 @@ func TestSessionImportAcceptsARealisticCookieJar(t *testing.T) {
 		t.Errorf("State = %q, want AUTHENTICATED", got)
 	}
 }
+
+func TestBrowserLoginRefusedWhileAuthenticated(t *testing.T) {
+	h, _, api := newCredentialsServer(t, testToken)
+	api.mu.Lock()
+	api.balance = 27350
+	api.mu.Unlock()
+
+	if w := post(t, h, testToken, "/api/v1/auth/session",
+		`{"cookies":[{"name":"t","value":"v"}]}`); w.Code != http.StatusNoContent {
+		t.Fatalf("setup: session import = %d", w.Code)
+	}
+
+	w := post(t, h, testToken, "/api/v1/auth/browser", `{"masked_target":"x"}`)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409 rather than discarding a live session", w.Code)
+	}
+	if bw := getTok(t, h, testToken, "/api/v1/balance"); bw.Code != http.StatusOK {
+		t.Errorf("balance = %d after the refused arm; the session must still work", bw.Code)
+	}
+}

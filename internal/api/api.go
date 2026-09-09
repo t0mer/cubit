@@ -357,6 +357,10 @@ func (h *Handler) writeAuthError(w http.ResponseWriter, err error) {
 		body.AttemptsRemaining = otpErr.Remaining
 		writeJSON(w, http.StatusUnauthorized, body)
 
+	case errors.Is(err, session.ErrAlreadyAuthenticated):
+		writeJSON(w, http.StatusConflict, statusBody(st,
+			"already authenticated; there is no need to log in again"))
+
 	case errors.Is(err, session.ErrChallengeExpired):
 		writeJSON(w, http.StatusGone, statusBody(st, "the otp challenge expired; start a new login"))
 
