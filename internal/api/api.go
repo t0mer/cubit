@@ -16,8 +16,10 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/t0mer/cubit/internal/apidocs"
 
 	"github.com/t0mer/cubit/internal/metrics"
 	"github.com/t0mer/cubit/internal/pluxee"
@@ -99,6 +101,9 @@ func (h *Handler) Routes() http.Handler {
 	// Probes stay open: an orchestrator's liveness check cannot carry a token.
 	r.Get("/healthz", h.handleHealthz)
 	r.Get("/readyz", h.handleReadyz)
+
+	// The specification is documentation, not data, so it stays open too.
+	apidocs.Mount(r)
 
 	// Everything that reads the balance or drives the state machine is guarded.
 	r.Group(func(r chi.Router) {
