@@ -528,3 +528,7 @@ func TestSetCredentialsAllowedWhileAuthenticated(t *testing.T) {
 		t.Errorf("State = %q, want the live session left alone", got)
 	}
 }
+
+// errSessionExpiredForTest returns the error the client reports for a session
+// the backend no longer accepts.
+func errSessionExpiredForTest() error { return pluxee.ErrSessionExpired }

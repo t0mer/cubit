@@ -100,6 +100,11 @@ type Manager struct {
 
 	challenge       *pluxee.Challenge
 	challengeExpiry time.Time
+	// external marks a login being driven by the cubit-login helper: cubit
+	// relays the code rather than submitting it. externalCode parks the code
+	// the phone posted, in memory only, until the helper collects it once.
+	external        bool
+	externalCode    string
 	attemptsLeft    int
 	authenticatedAt time.Time
 
@@ -318,6 +323,15 @@ func (m *Manager) SubmitOTP(ctx context.Context, code string) error {
 		return ErrNotAwaitingOTP
 	}
 
+	// A browser-assisted login is finished by the helper, which holds the
+	// challenge and can mint the captcha token the submission needs. Park the
+	// code for it rather than posting something the backend would reject.
+	if m.external {
+		m.externalCode = code
+		m.log.Info("parked an otp for the browser-assisted login to collect")
+		return nil
+	}
+
 	err := m.client.SubmitOTP(ctx, m.challenge, code)
 	if err == nil {
 		m.state = StateAuthenticated
@@ -372,6 +386,8 @@ func (m *Manager) expireChallengeLocked() {
 // resetLocked returns the machine to IDLE and wipes the pending challenge.
 func (m *Manager) resetLocked() {
 	m.state = StateIdle
+	m.external = false
+	m.externalCode = ""
 	m.challenge = nil
 	m.challengeExpiry = time.Time{}
 	m.attemptsLeft = 0
