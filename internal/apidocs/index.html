@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cubit API</title>
+    <link rel="stylesheet" href="/api/docs/swagger-ui.css" />
+    <style>
+      body { margin: 0; background: #fafafa; }
+      .swagger-ui .topbar { display: none; }
+    </style>
+  </head>
+  <body>
+    <div id="swagger-ui"></div>
+    <script src="/api/docs/swagger-ui-bundle.js"></script>
+    <script>
+      window.ui = SwaggerUIBundle({
+        url: "/api/docs/openapi.yaml",
+        dom_id: "#swagger-ui",
+        deepLinking: true,
+        // Deliberately not persistAuthorization: it would keep the API token —
+        // which doubles as the basic-auth password — in plaintext localStorage
+        // on every machine where someone used "Authorize".
+        persistAuthorization: false,
+      });
+    </script>
+  </body>
+</html>

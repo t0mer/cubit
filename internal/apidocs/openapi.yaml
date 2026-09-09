@@ -1,0 +1,399 @@
+openapi: 3.0.3
+
+info:
+  title: Cubit API
+  version: "1"
+  description: |
+    Cubit authenticates against the Israeli Cibus / Pluxee consumer platform,
+    reads the meal-card balance, and reports how many fixed-denomination
+    vouchers that balance covers.
+
+    Logging in needs a human: Pluxee sends a one-time code out of band, so the
+    service parks in `AWAITING_OTP` until someone posts the code back.
+
+        IDLE --login--> AWAITING_OTP --otp--> AUTHENTICATED
+
+  license:
+    name: Apache-2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: /
+    description: This instance
+
+tags:
+  - name: auth
+    description: The login state machine
+  - name: balance
+    description: Balance and voucher arithmetic
+  - name: ops
+    description: Probes and metrics
+
+security:
+  - apiToken: []
+  - basicAuth: []
+
+paths:
+  /healthz:
+    get:
+      tags: [ops]
+      summary: Liveness
+      description: Always open, so an orchestrator probe needs no credentials.
+      security: []
+      responses:
+        "200":
+          description: The process is alive.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  version: { type: string, example: 2026.9.0 }
+
+  /readyz:
+    get:
+      tags: [ops]
+      summary: Readiness
+      description: |
+        Ready only when the state is `AUTHENTICATED`. Always open, like
+        `/healthz`.
+      security: []
+      responses:
+        "200":
+          description: A usable Pluxee session is held.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ready }
+                  state: { $ref: "#/components/schemas/State" }
+        "503":
+          description: No usable session.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: not ready }
+                  state: { $ref: "#/components/schemas/State" }
+
+  /metrics:
+    get:
+      tags: [ops]
+      summary: Prometheus metrics
+      responses:
+        "200":
+          description: Metrics in the Prometheus text exposition format.
+          content:
+            text/plain:
+              schema: { type: string }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/auth/credentials:
+    post:
+      tags: [auth]
+      summary: Supply Cibus credentials at runtime
+      description: |
+        Credentials do not have to come from configuration. Post them here and
+        cubit uses them for the next login.
+
+        **Held in memory only.** They are never written to disk, so a restart
+        drops them. A restart with a valid persisted session is unaffected: it
+        reaches `AUTHENTICATED` with no OTP and no credentials.
+
+        **Refuses to run on an unguarded instance.** Every other route is open
+        when no API token is configured, which is deliberate first-run
+        behaviour, but an open endpoint that accepts the password to a financial
+        account is a different proposition — so this one returns `412` until a
+        token is set.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CredentialsRequest" }
+      responses:
+        "204":
+          description: |
+            Stored. The body is empty: the password is never echoed back, and
+            never appears in a log line at any level.
+        "400":
+          description: |
+            Malformed JSON, an unrecognised field, a body over 4 KiB, or either
+            half of the pair empty.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "409":
+          description: A login is awaiting an OTP. Answer it or let it expire first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "412":
+          description: No API token is configured, so this endpoint is disabled.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: Begin a login
+      description: |
+        Triggers the OTP to the account holder. Exactly one login may be in
+        flight: a second call while a challenge is outstanding returns `409`
+        rather than silently sending another message.
+      responses:
+        "200":
+          description: The backend authenticated outright; no OTP is needed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "202":
+          description: An OTP was sent. The masked destination is in the body.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "401":
+          description: |
+            Either the request carried no valid API token, or Pluxee rejected
+            the configured credentials.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "409":
+          description: A login is already awaiting an OTP.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "412":
+          description: |
+            No credentials are held, the account has no phone number on file, or
+            Pluxee demanded a reCAPTCHA token.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/auth/otp:
+    post:
+      tags: [auth]
+      summary: Submit the OTP code
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/OTPRequest" }
+      responses:
+        "200":
+          description: Authenticated. The session is persisted, encrypted.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "400":
+          description: Malformed body, an unrecognised field, or an empty code.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: |
+            Wrong code. `attempts_remaining` says how many are left before the
+            challenge is torn down and a fresh login is required.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "409":
+          description: No OTP is pending; start a login first.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "410":
+          description: The challenge outlived its TTL. Start a new login.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+
+  /api/v1/auth/status:
+    get:
+      tags: [auth]
+      summary: Current authentication state
+      responses:
+        "200":
+          description: The state machine's current position.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /api/v1/balance:
+    get:
+      tags: [balance]
+      summary: Balance and voucher calculation
+      description: |
+        All money is handled as `int64` agorot; the decimal strings alongside
+        each figure are for display only.
+      responses:
+        "200":
+          description: The current balance and what it buys.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/BalanceReport" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502": { $ref: "#/components/responses/BadGateway" }
+        "503":
+          description: |
+            Not authenticated. The body carries the auth state, so the caller
+            can tell whether an OTP is pending or credentials are missing.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuthStatus" }
+
+components:
+  securitySchemes:
+    apiToken:
+      type: apiKey
+      in: header
+      name: X-API-Token
+      description: |
+        Guards `/api/v1` and `/metrics`. `/healthz`, `/readyz` and `/api/docs`
+        are always open.
+
+        **Bootstrap mode:** when no token is configured, `/api/v1` and
+        `/metrics` are open to anyone who can reach the port. That is deliberate
+        first-run behaviour — the service must be reachable before it is
+        configured — and the process logs a warning at startup while it lasts.
+        `POST /api/v1/auth/credentials` is the one exception: it refuses to
+        operate until a token is set.
+    basicAuth:
+      type: http
+      scheme: basic
+      description: |
+        The same token, presented as the password half of basic auth. The
+        username is ignored. Comparison is constant-time.
+
+  responses:
+    Unauthorized:
+      description: An API token is configured and the request did not carry it.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    BadGateway:
+      description: The Pluxee backend could not be reached.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/AuthStatus" }
+
+  schemas:
+    State:
+      type: string
+      enum: [IDLE, AWAITING_OTP, AUTHENTICATED]
+      description: |
+        `IDLE` — nothing in flight.
+        `AWAITING_OTP` — a code was sent and is awaited.
+        `AUTHENTICATED` — a usable session is held.
+
+    Error:
+      type: object
+      properties:
+        error: { type: string }
+
+    CredentialsRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          description: Cibus / Pluxee username. Surrounding whitespace is trimmed.
+          example: alice
+        password:
+          type: string
+          format: password
+          description: Cibus / Pluxee password.
+        company:
+          type: string
+          description: Only if your employer's login asks for it.
+          default: ""
+      additionalProperties: false
+
+    OTPRequest:
+      type: object
+      required: [code]
+      properties:
+        code:
+          type: string
+          description: The one-time code delivered by SMS or voice call.
+          example: "123456"
+      additionalProperties: false
+
+    AuthStatus:
+      type: object
+      properties:
+        state: { $ref: "#/components/schemas/State" }
+        credentials_configured:
+          type: boolean
+          description: |
+            Whether a login could be started at all, or credentials still need
+            posting to `/api/v1/auth/credentials`.
+        masked_target:
+          type: string
+          description: Masked destination the OTP was sent to.
+          example: 05*-***1234
+        delivery_method:
+          type: string
+          description: How the OTP was delivered.
+          example: sms
+        attempts_remaining:
+          type: integer
+          description: Wrong codes left before the challenge is torn down.
+          example: 2
+        challenge_expires_at:
+          type: string
+          format: date-time
+        authenticated_at:
+          type: string
+          format: date-time
+        message:
+          type: string
+          description: Human-readable detail. Never contains a credential.
+      required: [state, credentials_configured]
+
+    BalanceReport:
+      type: object
+      properties:
+        balance_agorot:
+          type: integer
+          format: int64
+          example: 27350
+        balance: { type: string, example: "273.50" }
+        currency: { type: string, example: ILS }
+        voucher_value_agorot:
+          type: integer
+          format: int64
+          example: 5000
+        voucher_value: { type: string, example: "50.00" }
+        vouchers_affordable:
+          type: integer
+          format: int64
+          description: Integer division of the balance by the denomination.
+          example: 5
+        remainder_agorot:
+          type: integer
+          format: int64
+          example: 2350
+        remainder: { type: string, example: "23.50" }
+        restaurant_id: { type: string, example: "31999" }
+        checked_at: { type: string, format: date-time }
+      required:
+        - balance_agorot
+        - balance
+        - currency
+        - voucher_value_agorot
+        - voucher_value
+        - vouchers_affordable
+        - remainder_agorot
+        - remainder
+        - restaurant_id
+        - checked_at
