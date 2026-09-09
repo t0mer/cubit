@@ -97,9 +97,12 @@ func (b *browser) signIn(username, password string) (string, error) {
 		chromedp.WaitVisible(`#password`, chromedp.ByID),
 		chromedp.Sleep(time.Second),
 		chromedp.SendKeys(`#password`, password, chromedp.ByID),
-		chromedp.Sleep(500*time.Millisecond),
+		chromedp.Sleep(300*time.Millisecond),
 		chromedp.Click(xpathSignIn, chromedp.BySearch),
-		chromedp.Sleep(8*time.Second),
+		// Wait for the code screen rather than guessing how long the round trip
+		// takes. A blind sleep here was costing several seconds on every login
+		// and would still have been too short on a slow day.
+		chromedp.WaitVisible(`#otp-input-0`, chromedp.ByID),
 	); err != nil {
 		return "", fmt.Errorf("submitting the credentials: %w", err)
 	}
@@ -118,33 +121,40 @@ func (b *browser) signIn(username, password string) (string, error) {
 // submitOTP types the code and completes the login. The screen uses one input
 // per digit, so the code is sent character by character.
 func (b *browser) submitOTP(code string) error {
-	var boxes []string
-	if err := chromedp.Run(b.ctx, chromedp.Evaluate(`
-		Array.from(document.querySelectorAll('input'))
-		     .filter(e => e.offsetParent !== null &&
-		                  ['text','tel','number',''].includes((e.getAttribute('type')||'')))
-		     .map((e,i) => i)
-	`, &boxes)); err != nil {
-		return fmt.Errorf("finding the code inputs: %w", err)
+	// The digits live in #otp-input-0 .. #otp-input-5, each maxlength=1.
+	// Addressing them by id is the only reliable way: a generic "visible text
+	// inputs" list picks up another field as index 0 and shifts the whole code
+	// by one, which silently drops the first digit. Clicking is avoided too —
+	// the boxes overlap and intercept each other's pointer events.
+	tasks := chromedp.Tasks{chromedp.WaitVisible(`#otp-input-0`, chromedp.ByID)}
+	for i, ch := range code {
+		tasks = append(tasks,
+			chromedp.SetValue(fmt.Sprintf(`#otp-input-%d`, i), string(ch), chromedp.ByID))
 	}
-
-	// Typing into the focused field lets the SPA advance the caret itself,
-	// which is what a human does and what its handlers expect.
-	if err := chromedp.Run(b.ctx,
-		chromedp.Evaluate(`(() => {
-			const b = Array.from(document.querySelectorAll('input'))
-			  .filter(e => e.offsetParent !== null);
-			if (b.length) b[0].focus();
-			return b.length;
-		})()`, nil),
-		chromedp.KeyEvent(code),
-		chromedp.Sleep(1500*time.Millisecond),
-	); err != nil {
+	if err := chromedp.Run(b.ctx, tasks); err != nil {
 		return fmt.Errorf("entering the code: %w", err)
 	}
 
 	clickIfPresent(b.ctx, xpathContinue, 5*time.Second)
-	return chromedp.Run(b.ctx, chromedp.Sleep(10*time.Second))
+
+	// The page leaves /login once the code is accepted, so watch for that
+	// instead of sleeping. Bounded, because a rejected code never navigates.
+	doneCtx, cancel := context.WithTimeout(b.ctx, 30*time.Second)
+	defer cancel()
+	return chromedp.Run(doneCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+		for {
+			var url string
+			if err := chromedp.Location(&url).Do(ctx); err == nil &&
+				!strings.Contains(url, "/login") {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+			}
+		}
+	}))
 }
 
 // cookies reads the whole jar, including HttpOnly entries, which is the only
