@@ -111,21 +111,48 @@ func TestValidateAcceptsAGoodConfig(t *testing.T) {
 	}
 }
 
-func TestValidateRequiresCredentials(t *testing.T) {
+func TestValidateAcceptsAConfigWithNoCredentials(t *testing.T) {
 	c := validConfig()
 	c.Pluxee.Username = ""
+	c.Pluxee.Password = ""
+	if err := c.Validate(); err != nil {
+		t.Fatalf("Validate rejected a config whose credentials arrive over the api: %v", err)
+	}
+}
+
+func TestValidateRejectsAHalfSetCredentialPair(t *testing.T) {
+	c := validConfig()
+	c.Pluxee.Password = ""
 	err := c.Validate()
 	if err == nil {
-		t.Fatal("Validate accepted a config with no username")
+		t.Fatal("Validate accepted a username with no password")
 	}
-	if !strings.Contains(err.Error(), "username") {
-		t.Errorf("error %v should name the missing setting", err)
+	if !strings.Contains(err.Error(), "password") {
+		t.Errorf("error %v should name the missing half", err)
+	}
+
+	c = validConfig()
+	c.Pluxee.Username = ""
+	if err := c.Validate(); err == nil {
+		t.Fatal("Validate accepted a password with no username")
+	}
+}
+
+func TestHasCredentialsReportsWhetherBothHalvesAreSet(t *testing.T) {
+	c := validConfig()
+	if !c.HasCredentials() {
+		t.Error("HasCredentials = false for a fully configured pair")
+	}
+
+	c.Pluxee.Username = "   "
+	if c.HasCredentials() {
+		t.Error("HasCredentials = true for a blank username")
 	}
 
 	c = validConfig()
 	c.Pluxee.Password = ""
-	if err := c.Validate(); err == nil {
-		t.Fatal("Validate accepted a config with no password")
+	if c.HasCredentials() {
+		t.Error("HasCredentials = true for a missing password")
 	}
 }
 

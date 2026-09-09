@@ -80,6 +80,13 @@ func Default() *Config {
 	return c
 }
 
+// HasCredentials reports whether a usable Pluxee username and password are
+// configured. Credentials are optional at startup because they may instead be
+// supplied at runtime via POST /api/v1/auth/credentials.
+func (c *Config) HasCredentials() bool {
+	return strings.TrimSpace(c.Pluxee.Username) != "" && c.Pluxee.Password != ""
+}
+
 // EncryptionKey returns the 32-byte key used to encrypt the session at rest.
 //
 // A key file wins over an inline value, so a container can mount a secret
@@ -133,11 +140,15 @@ var validLogLevels = map[string]bool{
 // Validate checks the configuration is usable. It is called at startup so that
 // a bad setting fails fast rather than surfacing on the first request.
 func (c *Config) Validate() error {
-	if strings.TrimSpace(c.Pluxee.Username) == "" {
-		return fmt.Errorf("pluxee.username is required (env CUBIT_PLUXEE_USERNAME)")
+	// Credentials are optional here: they may be posted to
+	// /api/v1/auth/credentials instead. Half a pair is always a mistake though,
+	// so reject that rather than starting up in a state that cannot log in.
+	hasUser := strings.TrimSpace(c.Pluxee.Username) != ""
+	if hasUser && c.Pluxee.Password == "" {
+		return fmt.Errorf("pluxee.password is required alongside pluxee.username (env CUBIT_PLUXEE_PASSWORD)")
 	}
-	if c.Pluxee.Password == "" {
-		return fmt.Errorf("pluxee.password is required (env CUBIT_PLUXEE_PASSWORD)")
+	if !hasUser && c.Pluxee.Password != "" {
+		return fmt.Errorf("pluxee.username is required alongside pluxee.password (env CUBIT_PLUXEE_USERNAME)")
 	}
 	if c.Server.Address == "" {
 		return fmt.Errorf("server.address is required")

@@ -190,6 +190,12 @@ func bootstrap(ctx context.Context, sessions *session.Manager, handler *api.Hand
 		logger.Warn("could not restore the persisted session", "error", err)
 	}
 
+	if !cfg.HasCredentials() {
+		logger.Info("no pluxee credentials configured; " +
+			"POST them to /api/v1/auth/credentials, then POST /api/v1/auth/login")
+		return
+	}
+
 	if !cfg.Auth.Autostart {
 		logger.Info("autostart is off; POST /api/v1/auth/login to begin")
 		return

@@ -16,6 +16,9 @@ pluxee:
   auth_base: "https://api.capir.pluxee.co.il"
   # Everything else, including balances (the legacy single-endpoint backend).
   api_base: "https://api.consumers.pluxee.co.il/api/main.py"
+  # Optional here: they can be posted to /api/v1/auth/credentials at runtime
+  # instead (which needs server.api_token set). Setting only one half of the
+  # pair is rejected at startup.
   username: ""      # env: CUBIT_PLUXEE_USERNAME
   password: ""      # env: CUBIT_PLUXEE_PASSWORD
   company: ""       # only if your employer's login asks for it
