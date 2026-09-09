@@ -88,6 +88,7 @@ All endpoints are JSON. Application routes live under `/api/v1`.
 | `GET`  | `/api/v1/balance` | Balance and voucher calculation |
 | `GET`  | `/healthz` | Liveness |
 | `GET`  | `/readyz` | Ready only when `AUTHENTICATED` |
+| `POST` | `/api/v1/auth/logout` | End the session, at Pluxee and locally |
 | `GET`  | `/metrics` | Prometheus |
 | `GET`  | `/api/docs` | Swagger UI |
 
@@ -181,6 +182,21 @@ first.
 disk, so a restart drops them. The common restart is unaffected: a valid
 `token.enc` still reaches `AUTHENTICATED` with no OTP and no credentials. But if
 the session has expired, you will need to post them again before logging in.
+
+### `POST /api/v1/auth/logout`
+
+Revokes the session at Pluxee — the same call the web app makes when you sign
+out — then clears it locally: cookies out of memory, `token.enc` deleted, state
+back to `IDLE`. `204`.
+
+Revoking upstream is best effort. If Pluxee is unreachable the session is still
+cleared locally and the reason is logged: a backend outage must not leave a live
+session on disk. Without the upstream call the cookies would stay valid at
+Pluxee until they expired on their own, so a copy of `token.enc` would keep
+working long after you thought you had logged out.
+
+Idempotent — logging out with nothing held is a success, and sends nothing
+upstream.
 
 ## Configuration
 

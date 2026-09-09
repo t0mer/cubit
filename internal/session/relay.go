@@ -108,3 +108,27 @@ func (m *Manager) AdoptSession(ctx context.Context, cookies []*http.Cookie) erro
 	m.log.Info("adopted a session from a browser-assisted login")
 	return nil
 }
+
+// Logout ends the session: first at Pluxee, then here.
+//
+// Revoking upstream is best effort — a backend that cannot be reached must not
+// leave a session sitting on disk — but it is attempted first, because after
+// the local wipe there are no cookies left to revoke with.
+func (m *Manager) Logout(ctx context.Context) error {
+	m.mu.Lock()
+	wasAuthenticated := m.state == StateAuthenticated
+	m.mu.Unlock()
+
+	if wasAuthenticated {
+		if err := m.client.Logout(ctx); err != nil {
+			m.log.Warn("could not revoke the session at pluxee; clearing it locally anyway",
+				"error", err)
+		} else {
+			m.log.Info("revoked the session at pluxee")
+		}
+	}
+
+	m.Invalidate()
+	m.log.Info("logged out")
+	return nil
+}

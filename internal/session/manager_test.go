@@ -29,7 +29,9 @@ type fakeAPI struct {
 	balanceErr  error
 	balanceCall int
 
-	cookies []*http.Cookie
+	cookies     []*http.Cookie
+	logoutCalls int
+	logoutErr   error
 }
 
 func (f *fakeAPI) Login(_ context.Context, user, pass, _ string) (*pluxee.LoginResult, error) {
@@ -532,3 +534,13 @@ func TestSetCredentialsAllowedWhileAuthenticated(t *testing.T) {
 // errSessionExpiredForTest returns the error the client reports for a session
 // the backend no longer accepts.
 func errSessionExpiredForTest() error { return pluxee.ErrSessionExpired }
+
+func (f *fakeAPI) Logout(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logoutCalls++
+	if f.logoutErr == nil {
+		f.cookies = nil
+	}
+	return f.logoutErr
+}

@@ -239,6 +239,36 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: End the session
+      description: |
+        Revokes the session at Pluxee — the same `prx_logout` call the web app
+        makes when a user signs out — and then clears it locally: cookies out of
+        memory, `token.enc` deleted, state back to `IDLE`.
+
+        Revoking upstream is **best effort**. If Pluxee cannot be reached the
+        session is still cleared locally and the reason is logged, because a
+        backend outage must not leave a live session sitting on disk. The
+        upstream call is attempted first, since after the local wipe there are
+        no cookies left to revoke with.
+
+        Idempotent: logging out with nothing held is a success, so a caller can
+        always reach a known state without checking first. Nothing is sent
+        upstream in that case — there is nothing to revoke.
+      responses:
+        "204":
+          description: |
+            Logged out. Returned even when the upstream revocation failed; the
+            local session is gone either way.
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "502":
+          description: The logout could not be completed.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
   /api/v1/auth/session:
     post:
       tags: [auth]

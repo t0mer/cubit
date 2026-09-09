@@ -164,3 +164,59 @@ func TestExpectExternalOTPRefusedWhileAuthenticated(t *testing.T) {
 		t.Errorf("state = %q; the live session must survive", got)
 	}
 }
+
+func TestLogoutRevokesUpstreamAndClearsEverything(t *testing.T) {
+	api := &fakeAPI{balance: 27350}
+	m, _ := newManager(t, api)
+	if err := m.AdoptSession(context.Background(),
+		[]*http.Cookie{{Name: "token", Value: "live"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if api.logoutCalls != 1 {
+		t.Errorf("upstream logout called %d times, want 1", api.logoutCalls)
+	}
+	if got := m.State(); got != StateIdle {
+		t.Errorf("State = %q, want %q", got, StateIdle)
+	}
+	if _, err := m.store.Load(); !errors.Is(err, ErrNoSession) {
+		t.Error("the persisted session survived a logout")
+	}
+	if len(api.cookies) != 0 {
+		t.Error("the client still holds cookies after a logout")
+	}
+}
+
+// Revoking is best effort: a backend that cannot be reached must not leave the
+// session sitting on disk.
+func TestLogoutClearsEvenWhenTheBackendFails(t *testing.T) {
+	api := &fakeAPI{balance: 27350, logoutErr: errors.New("network is down")}
+	m, _ := newManager(t, api)
+	if err := m.AdoptSession(context.Background(),
+		[]*http.Cookie{{Name: "token", Value: "live"}}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := m.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout should not fail on an unreachable backend: %v", err)
+	}
+	if got := m.State(); got != StateIdle {
+		t.Errorf("State = %q, want %q", got, StateIdle)
+	}
+	if _, err := m.store.Load(); !errors.Is(err, ErrNoSession) {
+		t.Error("the persisted session survived a best-effort logout")
+	}
+}
+
+func TestLogoutIsIdempotentWhenIdle(t *testing.T) {
+	m, _ := newManager(t, &fakeAPI{})
+	if err := m.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout while idle: %v", err)
+	}
+	if got := m.State(); got != StateIdle {
+		t.Errorf("State = %q", got)
+	}
+}

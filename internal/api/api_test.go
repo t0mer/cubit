@@ -26,6 +26,8 @@ type fakeAPI struct {
 	balance     int64
 	balanceErr  error
 	cookies     []*http.Cookie
+	logoutCalls int
+	logoutErr   error
 }
 
 func (f *fakeAPI) Login(_ context.Context, user, _, _ string) (*pluxee.LoginResult, error) {
@@ -386,3 +388,13 @@ func newRequest(method, path string) *http.Request {
 }
 
 func recorder() *httptest.ResponseRecorder { return httptest.NewRecorder() }
+
+func (f *fakeAPI) Logout(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logoutCalls++
+	if f.logoutErr == nil {
+		f.cookies = nil
+	}
+	return f.logoutErr
+}

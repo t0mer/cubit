@@ -43,6 +43,7 @@ type API interface {
 	Login(ctx context.Context, username, password, company string) (*LoginResult, error)
 	SubmitOTP(ctx context.Context, ch *Challenge, code string) error
 	Balance(ctx context.Context) (int64, error)
+	Logout(ctx context.Context) error
 	Session() []*http.Cookie
 	RestoreSession(cookies []*http.Cookie) error
 }

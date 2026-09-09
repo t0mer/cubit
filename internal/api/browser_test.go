@@ -189,3 +189,52 @@ func TestBrowserLoginRefusedWhileAuthenticated(t *testing.T) {
 		t.Errorf("balance = %d after the refused arm; the session must still work", bw.Code)
 	}
 }
+
+func TestLogoutClearsAnAuthenticatedSession(t *testing.T) {
+	h, mgr, api := newCredentialsServer(t, testToken)
+	api.mu.Lock()
+	api.balance = 27350
+	api.mu.Unlock()
+
+	if w := post(t, h, testToken, "/api/v1/auth/session",
+		`{"cookies":[{"name":"t","value":"v"}]}`); w.Code != http.StatusNoContent {
+		t.Fatalf("setup: session import = %d", w.Code)
+	}
+
+	w := post(t, h, testToken, "/api/v1/auth/logout", "")
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d (%s), want 204", w.Code, w.Body.String())
+	}
+	if got := mgr.State(); string(got) != "IDLE" {
+		t.Errorf("State = %q, want IDLE", got)
+	}
+	api.mu.Lock()
+	calls := api.logoutCalls
+	api.mu.Unlock()
+	if calls != 1 {
+		t.Errorf("upstream logout called %d times, want 1", calls)
+	}
+	if bw := getTok(t, h, testToken, "/api/v1/balance"); bw.Code != http.StatusServiceUnavailable {
+		t.Errorf("balance after logout = %d, want 503", bw.Code)
+	}
+}
+
+func TestLogoutIsIdempotent(t *testing.T) {
+	h, _, api := newCredentialsServer(t, testToken)
+
+	if w := post(t, h, testToken, "/api/v1/auth/logout", ""); w.Code != http.StatusNoContent {
+		t.Fatalf("logout while idle = %d, want 204", w.Code)
+	}
+	api.mu.Lock()
+	defer api.mu.Unlock()
+	if api.logoutCalls != 0 {
+		t.Errorf("upstream logout called %d times while idle; there is nothing to revoke", api.logoutCalls)
+	}
+}
+
+func TestLogoutRequiresTheToken(t *testing.T) {
+	h, _, _ := newCredentialsServer(t, testToken)
+	if w := post(t, h, "", "/api/v1/auth/logout", ""); w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}

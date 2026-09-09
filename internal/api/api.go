@@ -120,6 +120,7 @@ func (h *Handler) Routes() http.Handler {
 			r.Post("/auth/browser", h.handleBrowserLogin)
 			r.Get("/auth/browser/otp", h.handleCollectOTP)
 			r.Post("/auth/session", h.handleSessionImport)
+			r.Post("/auth/logout", h.handleLogout)
 			r.Post("/auth/login", h.handleLogin)
 			r.Post("/auth/otp", h.handleOTP)
 			r.Get("/auth/status", h.handleAuthStatus)

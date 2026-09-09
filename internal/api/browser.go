@@ -158,3 +158,19 @@ func (h *Handler) handleSessionImport(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 }
+
+// handleLogout ends the session, at Pluxee first and then here.
+//
+// Idempotent: logging out when nothing is held is a success, not an error, so a
+// caller can always reach a known state without checking first.
+func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
+	if err := h.sessions.Logout(r.Context()); err != nil {
+		h.log.Error("logout failed", "error", err)
+		writeJSON(w, http.StatusBadGateway, map[string]string{
+			"error": "could not complete the logout",
+		})
+		return
+	}
+	h.metrics.SetAuthState(string(h.sessions.State()))
+	w.WriteHeader(http.StatusNoContent)
+}
