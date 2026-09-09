@@ -25,6 +25,7 @@ import (
 	"github.com/t0mer/cubit/internal/api"
 	"github.com/t0mer/cubit/internal/config"
 	"github.com/t0mer/cubit/internal/metrics"
+	"github.com/t0mer/cubit/internal/notify"
 	"github.com/t0mer/cubit/internal/pluxee"
 	"github.com/t0mer/cubit/internal/session"
 	"github.com/t0mer/cubit/internal/version"
@@ -116,6 +117,11 @@ func run(ctx context.Context, configPath string, flags *pflag.FlagSet) error {
 		return err
 	}
 
+	channels, err := notify.NewStore(cfg.DataDir, key)
+	if err != nil {
+		return err
+	}
+
 	handler, err := api.New(api.Options{
 		Sessions:     sessions,
 		Client:       client,
@@ -125,6 +131,8 @@ func run(ctx context.Context, configPath string, flags *pflag.FlagSet) error {
 		Logger:       logger,
 		Version:      version.Version,
 		APIToken:     cfg.Server.APIToken,
+		Channels:     channels,
+		Notifier:     notify.NewNotifier(channels, nil, logger),
 		// Stage 1's headline requirement: print the result.
 		OnReport: func(r api.BalanceReport) { fmt.Print(r.Render()) },
 	})

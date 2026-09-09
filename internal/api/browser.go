@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -20,6 +21,9 @@ import (
 //
 // Both endpoints refuse to run on an unguarded instance, for the same reason
 // /auth/credentials does: a session cookie is as good as the password.
+
+// balanceAfterLoginTimeout bounds the automatic check that follows a login.
+const balanceAfterLoginTimeout = 60 * time.Second
 
 type browserLoginRequest struct {
 	MaskedTarget string `json:"masked_target"`
@@ -146,6 +150,17 @@ func (h *Handler) handleSessionImport(w http.ResponseWriter, r *http.Request) {
 	switch err := h.sessions.AdoptSession(r.Context(), cookies); {
 	case err == nil:
 		h.log.Info("adopted a session from the cubit-login helper")
+		// Close the loop: a completed login reads the balance by itself, so the
+		// user gets their notification without having to call anything. Done on
+		// its own context and off the request path — the response is already
+		// written, and a slow Pluxee must not hold the helper open.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), balanceAfterLoginTimeout)
+			defer cancel()
+			if _, err := h.Check(ctx); err != nil {
+				h.log.Warn("could not read the balance after logging in", "error", err)
+			}
+		}()
 		w.WriteHeader(http.StatusNoContent)
 	case errors.Is(err, session.ErrSessionNotUsable):
 		writeJSON(w, http.StatusBadRequest, map[string]string{
