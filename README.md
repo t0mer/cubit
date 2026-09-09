@@ -89,9 +89,25 @@ All endpoints are JSON. Application routes live under `/api/v1`.
 | `GET`  | `/healthz` | Liveness |
 | `GET`  | `/readyz` | Ready only when `AUTHENTICATED` |
 | `GET`  | `/metrics` | Prometheus |
+| `GET`  | `/api/docs` | Swagger UI |
 
 `/api/v1` and `/metrics` are guarded by `CUBIT_SERVER_API_TOKEN` when it is set;
 `/healthz` and `/readyz` are always open so orchestrator probes keep working.
+
+### Interactive documentation
+
+Swagger UI is served at **`/api/docs`**, with the OpenAPI 3 document behind it at
+`/api/docs/openapi.yaml`. Both stay open even when an API token is configured:
+the specification is documentation, not data, and reading how to authenticate
+should not require having authenticated.
+
+The UI assets are embedded in the binary rather than pulled from a CDN, so the
+docs work on a host with no outbound internet, and a page that handles
+credentials loads no third-party JavaScript.
+
+`internal/apidocs/openapi.yaml` is the committed source of truth. A test walks
+the router and fails the build if a route is added without documenting it, or
+documented without existing.
 
 ### `POST /api/v1/auth/otp`
 
