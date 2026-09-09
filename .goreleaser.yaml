@@ -33,12 +33,40 @@ builds:
       - goos: windows
         goarch: "386"
 
+  # The browser-assisted login helper. It drives a Chrome you already have
+  # installed rather than bundling one, so it stays pure Go and cross-compiles
+  # like everything else — but it only makes sense where a browser exists, so
+  # no armv7 or 386, and it is never put in the container image.
+  - id: cubit-login
+    main: ./cmd/cubit-login
+    binary: cubit-login
+    env:
+      - CGO_ENABLED=0
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/t0mer/cubit/internal/version.Version={{ .Version }}
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+
 archives:
   - id: cubit
     ids: [cubit]
     name_template: >-
       {{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
       {{- with .Arm }}v{{ . }}{{ end }}
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+
+  - id: cubit-login
+    ids: [cubit-login]
+    name_template: >-
+      cubit-login_{{ .Version }}_{{ .Os }}_{{ .Arch }}
     formats: [tar.gz]
     format_overrides:
       - goos: windows
