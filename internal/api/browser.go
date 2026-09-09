@@ -174,3 +174,29 @@ func (h *Handler) handleLogout(w http.ResponseWriter, r *http.Request) {
 	h.metrics.SetAuthState(string(h.sessions.State()))
 	w.WriteHeader(http.StatusNoContent)
 }
+
+// handleLoginRequest hands a pending browser-login request to a waiting helper.
+//
+// This returns the Pluxee password, which nothing else in the API ever does.
+// That is the price of letting a POST to /auth/credentials trigger a real
+// login: the helper drives the actual login form and cannot fill it without
+// them. It is guarded by the API token, refuses to run unguarded, and is
+// single-use, so the credentials cross the wire once per login rather than on
+// every poll.
+func (h *Handler) handleLoginRequest(w http.ResponseWriter, _ *http.Request) {
+	if !h.guardedForHandoff(w) {
+		return
+	}
+
+	req, ok := h.sessions.TakeLoginRequest()
+	if !ok {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	h.log.Info("handing a browser-login request to a helper")
+	writeJSON(w, http.StatusOK, map[string]string{
+		"username": req.Username,
+		"password": req.Password,
+		"company":  req.Company,
+	})
+}

@@ -81,9 +81,8 @@ All endpoints are JSON. Application routes live under `/api/v1`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `POST` | `/api/v1/auth/credentials` | Supply Cibus credentials at runtime |
-| `POST` | `/api/v1/auth/login` | Begin login; triggers the OTP |
-| `POST` | `/api/v1/auth/otp` | Submit the OTP code |
+| `POST` | `/api/v1/auth/credentials` | **Log in** — starts a browser-assisted login |
+| `POST` | `/api/v1/auth/otp` | Submit the OTP code, completing the login |
 | `GET`  | `/api/v1/auth/status` | Current state, challenge details, whether credentials are set |
 | `GET`  | `/api/v1/balance` | Balance and voucher calculation |
 | `GET`  | `/healthz` | Liveness |
@@ -91,6 +90,18 @@ All endpoints are JSON. Application routes live under `/api/v1`.
 | `POST` | `/api/v1/auth/logout` | End the session, at Pluxee and locally |
 | `GET`  | `/metrics` | Prometheus |
 | `GET`  | `/api/docs` | Swagger UI |
+
+Logging in is two calls: post your credentials, then post the code Pluxee texts
+you. Everything else the login needs happens between cubit and the `cubit-login`
+helper over endpoints that are deliberately **not** in the published spec —
+`/auth/browser`, `/auth/browser/otp`, `/auth/login-request` and `/auth/session`.
+They are machine-to-machine plumbing, and documenting them was actively
+misleading: `/auth/browser` reads like a login button but only arms cubit to
+receive a code, sends no SMS, and blocks `/auth/credentials` while it sits
+there. `/auth/login` is likewise undocumented — Pluxee's reCAPTCHA means it can
+only ever answer `412`.
+
+If you ever wedge the state machine, `POST /api/v1/auth/logout` resets it.
 
 `/api/v1` and `/metrics` are guarded by `CUBIT_SERVER_API_TOKEN` when it is set;
 `/healthz` and `/readyz` are always open so orchestrator probes keep working.

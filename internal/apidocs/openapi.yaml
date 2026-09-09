@@ -103,8 +103,21 @@ paths:
       tags: [auth]
       summary: Supply Cibus credentials at runtime
       description: |
-        Credentials do not have to come from configuration. Post them here and
-        cubit uses them for the next login.
+        **This is how you log in.** Post your Cibus username and password here;
+        when a `cubit-login` helper is running alongside in watch mode, that is
+        the whole trigger. The helper drives a real browser through Pluxee's
+        login — the only way past its reCAPTCHA — and Pluxee sends a one-time
+        code to the account holder's phone. Submit that code to
+        `/api/v1/auth/otp` and the login completes.
+
+        Two calls, then, and nothing else: credentials, then the code.
+
+        With no helper running, this only stores the credentials. Cubit cannot
+        log in by itself: Pluxee will not start a login without a captcha token,
+        and those are single-use and mintable only by a browser.
+
+        Nothing happens if cubit is already authenticated — there is nothing to
+        log in for.
 
         **Held in memory only.** They are never written to disk, so a restart
         drops them. A restart with a valid persisted session is unaffected: it
@@ -156,89 +169,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
-  /api/v1/auth/browser:
-    post:
-      tags: [auth]
-      summary: Arm cubit for a browser-assisted login
-      description: |
-        Called by the `cubit-login` helper. Pluxee enforces reCAPTCHA on both
-        the credential post **and** the OTP submission, and only a real browser
-        can mint a token, so the helper owns the exchange with Pluxee while
-        cubit does two small things: catch the code the user's phone posts to
-        `/api/v1/auth/otp`, and adopt the session the helper captures.
-
-        This call never touches the Pluxee backend — there is no challenge here
-        to submit against. It only moves the state machine to `AWAITING_OTP` so
-        an arriving code is accepted, and starts the challenge TTL.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              properties:
-                masked_target:
-                  type: string
-                  description: Masked destination, for display only.
-                  example: "***-***1865"
-                method:
-                  type: string
-                  example: phone
-              additionalProperties: false
-      responses:
-        "202":
-          description: Armed. Post the code to `/api/v1/auth/otp` when it arrives.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AuthStatus" }
-        "400":
-          description: Malformed body or an unrecognised field.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "409":
-          description: |
-            A login is already awaiting an OTP, or cubit is already
-            authenticated. A held session is worth more than a new login, so
-            arming the relay will not discard one.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AuthStatus" }
-        "412":
-          description: No API token is configured, so browser handoff is disabled.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
-  /api/v1/auth/browser/otp:
-    get:
-      tags: [auth]
-      summary: Collect the parked OTP
-      description: |
-        Polled by the `cubit-login` helper until the user's phone posts the code.
-
-        **Single-use.** The code is a live credential for the few minutes it
-        exists, so it is handed over exactly once and a repeat poll returns
-        `204`. It is held in memory only and never written to disk or logged.
-      responses:
-        "200":
-          description: The code, handed over for the only time.
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  code: { type: string, example: "123456" }
-        "204":
-          description: No code parked — either none has arrived, or it was already collected.
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "412":
-          description: No API token is configured, so browser handoff is disabled.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
   /api/v1/auth/logout:
     post:
       tags: [auth]
@@ -269,118 +199,18 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/Error" }
 
-  /api/v1/auth/session:
-    post:
-      tags: [auth]
-      summary: Adopt a session captured by the helper
-      description: |
-        Hands cubit the cookies from a completed browser login.
-
-        The session is validated before it is trusted — cubit makes one balance
-        call with it — because storing a dead session would leave the service
-        looking authenticated while every read failed. A session that works is
-        persisted encrypted, and the state becomes `AUTHENTICATED`.
-
-        Refuses to run on an unguarded instance: a session cookie is as good as
-        the password.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: "#/components/schemas/SessionImport" }
-      responses:
-        "204":
-          description: Session adopted, validated and persisted. No body.
-        "400":
-          description: |
-            Malformed body, an empty cookie jar, or a session Pluxee does not
-            accept.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "401": { $ref: "#/components/responses/Unauthorized" }
-        "412":
-          description: No API token is configured, so browser handoff is disabled.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-        "502":
-          description: Pluxee could not be reached, so the session could not be validated.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/Error" }
-
-  /api/v1/auth/login:
-    post:
-      tags: [auth]
-      summary: Begin a login
-      description: |
-        Triggers the OTP to the account holder. Exactly one login may be in
-        flight: a second call while a challenge is outstanding returns `409`
-        rather than silently sending another message.
-
-        **Pluxee enforces reCAPTCHA on its login endpoint**, verified against a
-        real account on 2026-09-09: the same credentials return `210` (OTP sent)
-        when a captcha token accompanies them and `401` when one does not.
-        Because reCAPTCHA v3 tokens are single-use and expire in about two
-        minutes, one cannot be captured and reused, so an unattended login will
-        normally fail here with `412`. A session already held in `token.enc` is
-        unaffected — it is reused without logging in again.
-      responses:
-        "200":
-          description: The backend authenticated outright; no OTP is needed.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AuthStatus" }
-        "202":
-          description: An OTP was sent. The masked destination is in the body.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AuthStatus" }
-        "401":
-          description: |
-            Either the request carried no valid API token, or Pluxee rejected
-            the credentials.
-
-            Note that a credential rejection is only reported when a reCAPTCHA
-            token was actually configured. Without one, Pluxee answers `401` to
-            correct credentials too, so that case is reported as `412` rather
-            than blaming a password that may be perfectly good.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AuthStatus" }
-        "409":
-          description: A login is already awaiting an OTP.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AuthStatus" }
-        "412":
-          description: |
-            The login could not even be attempted. One of:
-
-            - no credentials are held — post them to `/api/v1/auth/credentials`;
-            - **a reCAPTCHA token is required** and none is configured. This is
-              the expected outcome for an unattended login; re-authentication
-              has to be done with a browser;
-            - the account has no phone number on file, so no OTP can be
-              delivered.
-
-            The `message` field says which.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AuthStatus" }
-        "502":
-          description: |
-            The Pluxee backend could not be reached, or it signalled an OTP
-            challenge while withholding the opaque handle needed to answer it.
-          content:
-            application/json:
-              schema: { $ref: "#/components/schemas/AuthStatus" }
-
   /api/v1/auth/otp:
     post:
       tags: [auth]
       summary: Submit the OTP code
+      description: |
+        The second and final step of a login. Post the code the account holder
+        received by SMS.
+
+        A `202` here is the normal, successful answer for a browser-assisted
+        login: the code has been received and handed to the helper, which
+        completes the login in the browser it is holding open. Watch
+        `/api/v1/auth/status` for the state to reach `AUTHENTICATED`.
       requestBody:
         required: true
         content:
@@ -535,33 +365,6 @@ components:
             Do not try to determine this by calling `/auth/showCompanyField`
             yourself without a reCAPTCHA token: it answers `true` without one and
             `false` with one, for the same username.
-      additionalProperties: false
-
-    SessionImport:
-      type: object
-      required: [cookies]
-      properties:
-        cookies:
-          type: array
-          minItems: 1
-          description: The cookie jar captured from the browser after login.
-          items:
-            type: object
-            required: [name, value]
-            properties:
-              name: { type: string, example: "token" }
-              value:
-                type: string
-                format: password
-                description: Treated as a secret; never logged or echoed back.
-              domain: { type: string, example: ".pluxee.co.il" }
-              path: { type: string, example: "/" }
-              secure: { type: boolean }
-              httpOnly: { type: boolean }
-              expires:
-                type: number
-                description: Unix seconds, as Chrome DevTools reports it.
-            additionalProperties: false
       additionalProperties: false
 
     OTPRequest:

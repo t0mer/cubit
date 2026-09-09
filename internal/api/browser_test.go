@@ -238,3 +238,44 @@ func TestLogoutRequiresTheToken(t *testing.T) {
 		t.Errorf("status = %d, want 401", w.Code)
 	}
 }
+
+func TestLoginRequestHandedToAWaitingHelper(t *testing.T) {
+	h, _, _ := newCredentialsServer(t, testToken)
+
+	if w := getTok(t, h, testToken, "/api/v1/auth/login-request"); w.Code != http.StatusNoContent {
+		t.Fatalf("poll before credentials = %d, want 204", w.Code)
+	}
+
+	if w := post(t, h, testToken, "/api/v1/auth/credentials",
+		`{"username":"alice","password":"secret","company":"acme"}`); w.Code != http.StatusNoContent {
+		t.Fatalf("setting credentials = %d", w.Code)
+	}
+
+	w := getTok(t, h, testToken, "/api/v1/auth/login-request")
+	if w.Code != http.StatusOK {
+		t.Fatalf("poll after credentials = %d, want 200", w.Code)
+	}
+	got := decode(t, w)
+	if got["username"] != "alice" || got["password"] != "secret" || got["company"] != "acme" {
+		t.Errorf("body = %v, want the credentials just set", got)
+	}
+
+	if w := getTok(t, h, testToken, "/api/v1/auth/login-request"); w.Code != http.StatusNoContent {
+		t.Errorf("second poll = %d, want 204; the request is single-use", w.Code)
+	}
+}
+
+func TestLoginRequestRefusedWhileUnguarded(t *testing.T) {
+	h, _, _ := newCredentialsServer(t, "")
+	if w := getTok(t, h, "", "/api/v1/auth/login-request"); w.Code != http.StatusPreconditionFailed {
+		t.Errorf("status = %d, want 412 on an unguarded instance", w.Code)
+	}
+}
+
+func TestLoginRequestRequiresTheToken(t *testing.T) {
+	h, _, _ := newCredentialsServer(t, testToken)
+	post(t, h, testToken, "/api/v1/auth/credentials", `{"username":"a","password":"b"}`)
+	if w := getTok(t, h, "", "/api/v1/auth/login-request"); w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}

@@ -98,6 +98,46 @@ func TestSwaggerAssetsAreServedWithTheRightTypes(t *testing.T) {
 	}
 }
 
+// internalRoutes are registered but deliberately absent from openapi.yaml.
+//
+// They are machine-to-machine plumbing between cubit and the cubit-login
+// helper, not endpoints anyone should call by hand — and publishing them in
+// Swagger actively misled: /auth/browser reads like a login button, but it only
+// arms cubit to receive a code and sends no SMS, so calling it just wedges the
+// state machine. /auth/login is here for a different reason: Pluxee's reCAPTCHA
+// means it can now only ever answer 412.
+//
+// The list is explicit so the drift test stays strict: a new route must be
+// either documented or named here on purpose.
+var internalRoutes = map[string]string{
+	"POST /api/v1/auth/browser":      "helper arms the otp relay",
+	"GET /api/v1/auth/browser/otp":   "helper collects the parked code",
+	"GET /api/v1/auth/login-request": "helper collects a pending login",
+	"POST /api/v1/auth/session":      "helper hands over a captured session",
+	"POST /api/v1/auth/login":        "unreachable: pluxee requires a captcha token",
+}
+
+// TestInternalRoutesStillExist guards the list above from rotting: an entry for
+// a route that no longer exists would silently weaken the drift test.
+func TestInternalRoutesStillExist(t *testing.T) {
+	h, _ := newServer(t, &fakeAPI{})
+	routes, ok := h.(chi.Routes)
+	if !ok {
+		t.Fatal("the handler does not expose its routes")
+	}
+
+	registered := map[string]bool{}
+	_ = chi.Walk(routes, func(method, route string, _ http.Handler, _ ...func(http.Handler) http.Handler) error {
+		registered[method+" "+strings.TrimSuffix(route, "/*")] = true
+		return nil
+	})
+	for r, why := range internalRoutes {
+		if !registered[r] {
+			t.Errorf("internalRoutes lists %q (%s) but no such route is registered", r, why)
+		}
+	}
+}
+
 // TestSpecMatchesTheRegisteredRoutes is the test that stops the spec rotting:
 // it fails when a route is added without documenting it, or documented without
 // existing. The docs routes themselves are excluded — a spec that documents its
@@ -131,6 +171,9 @@ func TestSpecMatchesTheRegisteredRoutes(t *testing.T) {
 			route = "/"
 		}
 		if strings.HasPrefix(route, "/api/docs") {
+			return nil
+		}
+		if _, internal := internalRoutes[method+" "+route]; internal {
 			return nil
 		}
 		registered[method+" "+route] = true
