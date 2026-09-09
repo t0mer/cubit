@@ -81,9 +81,10 @@ All endpoints are JSON. Application routes live under `/api/v1`.
 
 | Method | Path | Purpose |
 |---|---|---|
+| `POST` | `/api/v1/auth/credentials` | Supply Cibus credentials at runtime |
 | `POST` | `/api/v1/auth/login` | Begin login; triggers the OTP |
 | `POST` | `/api/v1/auth/otp` | Submit the OTP code |
-| `GET`  | `/api/v1/auth/status` | Current state and challenge details |
+| `GET`  | `/api/v1/auth/status` | Current state, challenge details, whether credentials are set |
 | `GET`  | `/api/v1/balance` | Balance and voucher calculation |
 | `GET`  | `/healthz` | Liveness |
 | `GET`  | `/readyz` | Ready only when `AUTHENTICATED` |
@@ -130,7 +131,40 @@ caller can tell whether an OTP is pending.
 
 `202` with the masked destination when an OTP was sent, `200` if the backend
 authenticated outright. A second login while one is already pending returns
-`409` — it will not silently send you another SMS.
+`409` — it will not silently send you another SMS. `412` when no credentials are
+held yet.
+
+### `POST /api/v1/auth/credentials`
+
+```json
+{ "username": "alice", "password": "secret", "company": "" }
+```
+
+Credentials do not have to come from configuration. Post them here instead and
+cubit will use them for the next login.
+
+`204` on success, with no body — the password is never echoed back, and never
+appears in a log line at any level.
+
+| Code | Meaning |
+|---|---|
+| `204` | Stored |
+| `400` | Malformed JSON, or either half of the pair is empty |
+| `409` | A login is awaiting an OTP; answer it or let it expire first |
+| `412` | No API token is configured — see below |
+| `401` | An API token is configured and the request did not carry it |
+
+**This endpoint refuses to run on an unguarded instance.** Every other route is
+open when `CUBIT_SERVER_API_TOKEN` is unset, which is deliberate first-run
+behaviour, but an open endpoint that accepts the password to a financial account
+is a different proposition — anyone who can reach the port could hand cubit
+their own credentials, and yours would cross the wire unprotected. Set a token
+first.
+
+**Credentials posted here are held in memory only.** They are never written to
+disk, so a restart drops them. The common restart is unaffected: a valid
+`token.enc` still reaches `AUTHENTICATED` with no OTP and no credentials. But if
+the session has expired, you will need to post them again before logging in.
 
 ## Configuration
 
@@ -146,8 +180,8 @@ replaced by underscores.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `CUBIT_PLUXEE_USERNAME` | — | **Required.** Cibus/Pluxee username |
-| `CUBIT_PLUXEE_PASSWORD` | — | **Required.** Cibus/Pluxee password |
+| `CUBIT_PLUXEE_USERNAME` | — | Cibus/Pluxee username; optional if posted to the API |
+| `CUBIT_PLUXEE_PASSWORD` | — | Cibus/Pluxee password; optional if posted to the API |
 | `CUBIT_AUTH_ENCRYPTION_KEY` | — | **Required.** 32 bytes, raw / hex / base64 |
 | `CUBIT_AUTH_ENCRYPTION_KEY_FILE` | — | Path to a key file; wins over the above |
 | `CUBIT_PLUXEE_COMPANY` | — | Only if your employer's login asks for it |
@@ -166,7 +200,11 @@ replaced by underscores.
 | `CUBIT_LOG_FORMAT` | `json` | `json` or `text` |
 
 Credentials are accepted from the environment or a mounted file only — never as
-a command-line flag, because flags are visible in the process table.
+a command-line flag, because flags are visible in the process table. They may
+also be left unset entirely and posted to
+[`/api/v1/auth/credentials`](#post-apiv1authcredentials) at runtime; setting only
+one half of the pair is rejected at startup. With neither set, cubit starts in
+`IDLE` and waits.
 
 ### CLI flags
 
