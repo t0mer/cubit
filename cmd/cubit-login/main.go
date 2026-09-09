@@ -43,6 +43,7 @@ func run() error {
 		pollEvery  = pflag.Duration("poll-interval", 2*time.Second, "how often to ask cubit for the code")
 		chromePath = pflag.String("chrome", "", "path to a Chrome/Chromium binary (default: found on PATH)")
 		headful    = pflag.Bool("headful", false, "show the browser window, for debugging a changed page")
+		noSandbox  = pflag.Bool("no-sandbox", false, "disable Chrome's sandbox; needed only when running as root, e.g. in a container")
 		printOnly  = pflag.Bool("print", false, "print the captured session instead of sending it to cubit")
 		showVer    = pflag.Bool("version", false, "print the version and exit")
 	)
@@ -83,7 +84,7 @@ func run() error {
 	client := newCubitClient(*cubitURL, *token)
 
 	fmt.Println("Starting a browser…")
-	b := newBrowser(ctx, *chromePath, *headful)
+	b := newBrowser(ctx, *chromePath, *headful, *noSandbox)
 	defer b.close()
 
 	masked, err := b.signIn(*username, password)

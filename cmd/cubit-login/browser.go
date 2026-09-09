@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -34,7 +35,7 @@ type browser struct {
 
 // newBrowser starts Chrome. headful is worth having: if the page changes and a
 // step stops matching, watching it fail is the fastest way to see why.
-func newBrowser(parent context.Context, chromePath string, headful bool) *browser {
+func newBrowser(parent context.Context, chromePath string, headful, noSandbox bool) *browser {
 	opts := append(chromedp.DefaultExecAllocatorOptions[:],
 		chromedp.Flag("headless", !headful),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
@@ -43,6 +44,11 @@ func newBrowser(parent context.Context, chromePath string, headful bool) *browse
 	)
 	if chromePath != "" {
 		opts = append(opts, chromedp.ExecPath(chromePath))
+	}
+	// Chrome refuses to start as root with its sandbox on. Opt-in only: the
+	// sandbox is a real defence, and this helper handles a live login.
+	if noSandbox {
+		opts = append(opts, chromedp.NoSandbox)
 	}
 	allocCtx, cancelAlloc := chromedp.NewExecAllocator(parent, opts...)
 	taskCtx, cancelTask := chromedp.NewContext(allocCtx)
@@ -62,18 +68,29 @@ func clickIfPresent(ctx context.Context, xpath string, wait time.Duration) {
 // signIn walks the two-step login and stops at the OTP prompt, returning the
 // masked destination the page reports.
 func (b *browser) signIn(username, password string) (string, error) {
-	if err := chromedp.Run(b.ctx,
-		chromedp.Navigate(loginURL),
-		chromedp.Sleep(3*time.Second),
-	); err != nil {
+	// Navigate waits for the load event, and this SPA never fires one: its chat
+	// widget holds connections open indefinitely. Bound it and move on — what
+	// matters is whether the username field appears, which is checked next.
+	navCtx, cancelNav := context.WithTimeout(b.ctx, 45*time.Second)
+	err := chromedp.Run(navCtx, chromedp.Navigate(loginURL))
+	cancelNav()
+	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		return "", fmt.Errorf("opening the login page: %w", err)
+	}
+
+	readyCtx, cancelReady := context.WithTimeout(b.ctx, 45*time.Second)
+	err = chromedp.Run(readyCtx, chromedp.WaitVisible(`#user`, chromedp.ByID))
+	cancelReady()
+	if err != nil {
+		return "", fmt.Errorf("the login form never appeared: %w", err)
 	}
 
 	clickIfPresent(b.ctx, xpathCookieOK, 5*time.Second)
 	clickIfPresent(b.ctx, xpathPasswordTb, 5*time.Second)
 
-	if err := chromedp.Run(b.ctx,
-		chromedp.WaitVisible(`#user`, chromedp.ByID),
+	stepCtx, cancelStep := context.WithTimeout(b.ctx, 120*time.Second)
+	defer cancelStep()
+	if err := chromedp.Run(stepCtx,
 		chromedp.SendKeys(`#user`, username, chromedp.ByID),
 		chromedp.Sleep(500*time.Millisecond),
 		chromedp.Click(xpathContinue, chromedp.BySearch),
