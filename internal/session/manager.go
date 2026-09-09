@@ -103,8 +103,11 @@ type Manager struct {
 	// external marks a login being driven by the cubit-login helper: cubit
 	// relays the code rather than submitting it. externalCode parks the code
 	// the phone posted, in memory only, until the helper collects it once.
-	external        bool
-	externalCode    string
+	external     bool
+	externalCode string
+	// loginRequested marks that credentials arrived while no session was held,
+	// so a helper running alongside should drive a browser login.
+	loginRequested  bool
 	attemptsLeft    int
 	authenticatedAt time.Time
 
@@ -260,7 +263,15 @@ func (m *Manager) SetCredentials(username, password, company string) error {
 	m.username = username
 	m.password = password
 	m.company = strings.TrimSpace(company)
-	m.log.Info("pluxee credentials set via the api")
+
+	// Credentials arriving without a session is the trigger for a login. With a
+	// session already held there is nothing to log in for, so do not ask.
+	if m.state != StateAuthenticated {
+		m.loginRequested = true
+		m.log.Info("pluxee credentials set via the api; a browser-assisted login is wanted")
+	} else {
+		m.log.Info("pluxee credentials set via the api")
+	}
 	return nil
 }
 
@@ -386,6 +397,7 @@ func (m *Manager) expireChallengeLocked() {
 // resetLocked returns the machine to IDLE and wipes the pending challenge.
 func (m *Manager) resetLocked() {
 	m.state = StateIdle
+	m.loginRequested = false
 	m.external = false
 	m.externalCode = ""
 	m.challenge = nil
