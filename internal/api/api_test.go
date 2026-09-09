@@ -21,15 +21,17 @@ type fakeAPI struct {
 
 	loginResult *pluxee.LoginResult
 	loginErr    error
+	lastUser    string
 	otpErr      error
 	balance     int64
 	balanceErr  error
 	cookies     []*http.Cookie
 }
 
-func (f *fakeAPI) Login(context.Context, string, string, string) (*pluxee.LoginResult, error) {
+func (f *fakeAPI) Login(_ context.Context, user, _, _ string) (*pluxee.LoginResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.lastUser = user
 	return f.loginResult, f.loginErr
 }
 

@@ -106,6 +106,7 @@ func (h *Handler) Routes() http.Handler {
 		r.Method(http.MethodGet, "/metrics",
 			promhttp.HandlerFor(h.metrics.Registry(), promhttp.HandlerOpts{}))
 		r.Route("/api/v1", func(r chi.Router) {
+			r.Post("/auth/credentials", h.handleCredentials)
 			r.Post("/auth/login", h.handleLogin)
 			r.Post("/auth/otp", h.handleOTP)
 			r.Get("/auth/status", h.handleAuthStatus)
@@ -190,18 +191,24 @@ type authStatusBody struct {
 	AttemptsRemaining int           `json:"attempts_remaining,omitempty"`
 	ExpiresAt         *time.Time    `json:"challenge_expires_at,omitempty"`
 	AuthenticatedAt   *time.Time    `json:"authenticated_at,omitempty"`
-	Message           string        `json:"message,omitempty"`
+
+	// CredentialsConfigured tells a caller whether a login can be started at
+	// all, or whether credentials still need posting to /auth/credentials.
+	CredentialsConfigured bool `json:"credentials_configured"`
+
+	Message string `json:"message,omitempty"`
 }
 
 func statusBody(st session.Status, msg string) authStatusBody {
 	return authStatusBody{
-		State:             st.State,
-		MaskedTarget:      st.MaskedTarget,
-		DeliveryMethod:    st.DeliveryMethod,
-		AttemptsRemaining: st.AttemptsRemaining,
-		ExpiresAt:         st.ChallengeExpiresAt,
-		AuthenticatedAt:   st.AuthenticatedAt,
-		Message:           msg,
+		State:                 st.State,
+		CredentialsConfigured: st.CredentialsConfigured,
+		MaskedTarget:          st.MaskedTarget,
+		DeliveryMethod:        st.DeliveryMethod,
+		AttemptsRemaining:     st.AttemptsRemaining,
+		ExpiresAt:             st.ChallengeExpiresAt,
+		AuthenticatedAt:       st.AuthenticatedAt,
+		Message:               msg,
 	}
 }
 
@@ -213,6 +220,56 @@ func (h *Handler) handleAuthStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleLogin starts a login. A successful start returns 202 with the masked
 // destination the OTP was sent to.
+// credentialsRequest is the body of POST /api/v1/auth/credentials.
+type credentialsRequest struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+	Company  string `json:"company"`
+}
+
+// handleCredentials accepts Pluxee credentials at runtime, so they need not be
+// baked into the configuration.
+//
+// It refuses to run on an unguarded instance. Every other endpoint is open when
+// no API token is configured, which is deliberate first-run behaviour, but an
+// open endpoint that accepts a password for a financial account is a different
+// proposition: anyone reachable on the network could feed cubit their own
+// credentials, and yours would cross the wire unprotected.
+//
+// The credentials are held in memory only, and nothing here is ever logged or
+// echoed back.
+func (h *Handler) handleCredentials(w http.ResponseWriter, r *http.Request) {
+	if h.apiToken == "" {
+		writeJSON(w, http.StatusPreconditionFailed, map[string]string{
+			"error": "configure an api token (server.api_token) before posting credentials",
+		})
+		return
+	}
+
+	var req credentialsRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+	dec.DisallowUnknownFields()
+	// Deliberately not echoing the body: it holds the password.
+	if err := dec.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "body must be json of the form {\"username\":\"...\",\"password\":\"...\"}",
+		})
+		return
+	}
+
+	switch err := h.sessions.SetCredentials(req.Username, req.Password, req.Company); {
+	case err == nil:
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, session.ErrLoginInProgress):
+		writeJSON(w, http.StatusConflict, statusBody(h.sessions.Status(),
+			"a login is awaiting an otp; answer or let it expire before changing credentials"))
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": "username and password are both required",
+		})
+	}
+}
+
 func (h *Handler) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ch, err := h.sessions.Login(r.Context())
 	if err != nil {
@@ -283,6 +340,10 @@ func (h *Handler) writeAuthError(w http.ResponseWriter, err error) {
 
 	case errors.Is(err, session.ErrLoginInProgress):
 		writeJSON(w, http.StatusConflict, statusBody(st, "a login is already awaiting an otp"))
+
+	case errors.Is(err, session.ErrNoCredentials):
+		writeJSON(w, http.StatusPreconditionFailed, statusBody(st,
+			"no pluxee credentials are configured; post them to /api/v1/auth/credentials"))
 
 	case errors.Is(err, session.ErrNotAwaitingOTP):
 		writeJSON(w, http.StatusConflict, statusBody(st, "no otp is pending; start a login first"))
