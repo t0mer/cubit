@@ -1,5 +1,8 @@
 # Cubit
 
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![Go](https://img.shields.io/badge/go-1.26-00ADD8.svg?logo=go)](go.mod)
+
 Cubit reads your Israeli **Cibus / Pluxee** meal-card balance and tells you how
 many fixed-denomination vouchers it buys.
 
@@ -10,18 +13,64 @@ Affordable    : 5 vouchers
 Remainder     : ₪23.50
 ```
 
-It is a small self-hosted Go service: one static binary, an 11 MB `scratch`
+It is a small self-hosted Go service: one static binary, a ~22 MB `scratch`
 container, a JSON API, and Prometheus metrics.
+A companion helper, `cubit-login`, handles the one step that needs a real
+browser: logging in past Pluxee's reCAPTCHA.
 
 > **Stage 1.** Cubit reports. It does **not** buy anything — no cart, no orders,
 > no scheduling. Purchasing is deliberately out of scope.
 
+## Contents
+
+- [Features](#features)
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Configuration](#configuration)
+- [HTTP API](#http-api)
+- [Notifications](#notifications)
+- [Metrics](#metrics)
+- [Authentication](#authentication)
+- [Re-authenticating with `cubit-login`](#re-authenticating-with-cubit-login)
+- [The voucher maths](#the-voucher-maths)
+- [Security](#security)
+- [A caveat worth reading](#a-caveat-worth-reading)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Licence](#licence)
+
 ---
 
-## How logging in works
+## Features
 
-Pluxee sends a one-time code out of band, so Cubit cannot log in unattended. It
-starts a login, parks in `AWAITING_OTP`, and waits for you to hand it the code:
+- Reads the Cibus / Pluxee balance and computes how many vouchers of a
+  configurable denomination it covers, and what is left over.
+- Integer-only money (agorot), so no floating-point rounding errors.
+- OTP-based login state machine (`IDLE` → `AWAITING_OTP` → `AUTHENTICATED`),
+  driven over a JSON API.
+- Session **encrypted at rest** with AES-256-GCM, so restarts usually need no
+  new code.
+- Browser-assisted login helper (`cubit-login`) that drives a local Chrome to
+  get past Pluxee's reCAPTCHA, with an optional watch mode.
+- Notifications after every balance check via Shoutrrr (Slack, Discord,
+  Telegram, Gotify, SMTP, ntfy, …), GreenAPI (WhatsApp) or a self-hosted
+  WhatsApp Web gateway. Channel credentials are encrypted at rest and redacted
+  in the API.
+- Prometheus metrics at `/metrics`, plus `/healthz` and `/readyz` probes.
+- Optional API token (header or basic auth), compared in constant time.
+- Swagger UI at `/api/docs`, with embedded assets and an OpenAPI 3 spec that a
+  test keeps in sync with the router.
+- Configuration by YAML, `CUBIT_*` environment variables, or flags.
+- `scratch` container running as uid 10001; multi-arch builds for
+  `linux/amd64`, `linux/arm64` and `linux/arm/v7`.
+
+## How it works
+
+Pluxee sends a one-time code out of band, so Cubit cannot log in unattended. A
+login parks in `AWAITING_OTP` and waits for you to hand it the code:
 
 ```
 IDLE ──login──> AWAITING_OTP ──otp──> AUTHENTICATED
@@ -33,75 +82,225 @@ The resulting session is **encrypted to disk with AES-256-GCM**, so a restart
 normally goes straight back to `AUTHENTICATED` without a new code. That is what
 makes the service usable day to day.
 
+Because Pluxee's login endpoint also enforces reCAPTCHA (see
+[A caveat worth reading](#a-caveat-worth-reading)), the login itself is performed
+by `cubit-login` in a real browser, which then hands the session to Cubit:
+
+```mermaid
+flowchart LR
+    you["You / SMS-forwarding app"] -- "credentials, OTP" --> cubit["cubit (API :8080)"]
+    helper["cubit-login + local Chrome"] -- "login request, OTP, session hand-off" --> cubit
+    helper -- "browser login (reCAPTCHA)" --> pluxee["Pluxee"]
+    cubit -- "balance, logout" --> pluxee
+    cubit -- "token.enc, channels.enc" --> data[("/data volume")]
+    prom["Prometheus"] -- "scrape /metrics" --> cubit
+    cubit -- "run results" --> notif["Shoutrrr / GreenAPI / WhatsApp Web"]
+```
+
+On startup Cubit restores the session from `token.enc` if it is still valid and
+reads the balance at once. Each successful balance check is printed to stdout,
+recorded in the metrics, and sent to the matching notification channels.
+
+## Requirements
+
+- A Cibus / Pluxee account and access to the phone that receives its one-time
+  codes.
+- A 32-byte encryption key (raw, hex or base64) for the data at rest.
+- Docker, or Go 1.26+ to build from source.
+- For logging in: a machine with Chrome or Chromium installed to run
+  `cubit-login`. It can be a different machine from the one running Cubit, as
+  long as it can reach Cubit's API.
+
+## Installation
+
+> **No published artifacts yet.** There are no GitHub Releases and no image on
+> Docker Hub or GHCR at the moment, so build from source. The release pipeline
+> is in place (see [Releases](#releases)); once it has run, binaries will be
+> attached to GitHub Releases and the image pushed to Docker Hub under the
+> account in the `DOCKERHUB_USERNAME` secret (`docker-compose.yml` expects
+> `techblog/cubit`).
+
+### Docker image (build locally)
+
+```bash
+git clone https://github.com/t0mer/cubit.git
+cd cubit
+docker build -t techblog/cubit:latest --build-arg VERSION=dev .
+```
+
+Tagging it `techblog/cubit:latest` lets the bundled
+[`docker-compose.yml`](docker-compose.yml) use it as is.
+
+### Binaries from source
+
+```bash
+go build -o cubit       ./cmd/cubit
+go build -o cubit-login ./cmd/cubit-login
+```
+
+Add `-ldflags "-X github.com/t0mer/cubit/internal/version.Version=<version>"`
+to stamp a version into either binary.
+
+`cubit-login` is **not** in the container image — it needs a browser, and Cubit
+stays a static binary on `scratch`. Release archives, once published, include it
+separately for Linux, macOS and Windows on amd64 and arm64.
+
 ## Quick start
 
+1. **Start Cubit** with an encryption key and an API token. The token is
+   required for the credentials and browser-handoff endpoints.
+
+   ```bash
+   export CUBIT_SERVER_API_TOKEN="$(head -c 24 /dev/urandom | base64)"
+   docker run -d --name cubit \
+     -p 8080:8080 \
+     -v cubit-data:/data \
+     -e CUBIT_AUTH_ENCRYPTION_KEY="$(head -c 32 /dev/urandom | base64)" \
+     -e CUBIT_SERVER_API_TOKEN \
+     techblog/cubit:latest
+   ```
+
+   **Keep the volume and the key.** The volume holds the encrypted session; lose
+   it — or lose `CUBIT_AUTH_ENCRYPTION_KEY` — and the next start needs a fresh
+   code. Store the key somewhere safe rather than generating it inline every
+   time.
+
+2. **Run the login helper** in watch mode on a machine with Chrome:
+
+   ```bash
+   cubit-login --watch --url http://localhost:8080 --token "$CUBIT_SERVER_API_TOKEN"
+   ```
+
+3. **Post your credentials.** That starts the login, and Pluxee texts you a
+   code:
+
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/auth/credentials \
+        -H "X-API-Token: $CUBIT_SERVER_API_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -d '{"username":"0501234567","password":"..."}'
+   ```
+
+4. **Submit the code:**
+
+   ```bash
+   curl -X POST http://localhost:8080/api/v1/auth/otp \
+        -H "X-API-Token: $CUBIT_SERVER_API_TOKEN" \
+        -H 'Content-Type: application/json' \
+        -d '{"code":"123456"}'
+   ```
+
+5. **Read the balance:**
+
+   ```bash
+   curl -s -H "X-API-Token: $CUBIT_SERVER_API_TOKEN" \
+        http://localhost:8080/api/v1/balance | jq
+   ```
+
+If you set `CUBIT_PLUXEE_USERNAME` and `CUBIT_PLUXEE_PASSWORD` instead of
+posting them, Cubit tries a direct login on boot (`CUBIT_AUTH_AUTOSTART`). As long
+as Pluxee demands a captcha, that attempt fails and is logged; run `cubit-login`
+without `--watch` (see [below](#re-authenticating-with-cubit-login)) to log in.
+
+### Docker Compose
+
 ```bash
-docker run -d --name cubit \
-  -p 8080:8080 \
-  -v cubit-data:/data \
-  -e CUBIT_PLUXEE_USERNAME='you@example.com' \
-  -e CUBIT_PLUXEE_PASSWORD='...' \
-  -e CUBIT_AUTH_ENCRYPTION_KEY="$(head -c 32 /dev/urandom | base64)" \
-  techblog/cubit:latest
-```
-
-On boot Cubit starts a login and logs the masked destination the code went to.
-Submit the code:
-
-```bash
-curl -X POST http://localhost:8080/api/v1/auth/otp \
-     -H 'Content-Type: application/json' \
-     -d '{"code":"123456"}'
-```
-
-Then read the balance:
-
-```bash
-curl -s http://localhost:8080/api/v1/balance | jq
-```
-
-**Keep the volume.** It holds the encrypted session. Lose it — or lose
-`CUBIT_AUTH_ENCRYPTION_KEY` — and the next start needs a fresh code.
-
-### docker compose
-
-```bash
-export CIBUS_USER='you@example.com' CIBUS_PASS='...'
+export CIBUS_USER='0501234567' CIBUS_PASS='...'
 export CUBIT_KEY="$(head -c 32 /dev/urandom | base64)"
 docker compose up -d
 ```
 
-See [`docker-compose.yml`](docker-compose.yml). It uses a **named volume**, not a
-bind mount: the image runs as uid 10001 and a root-owned host directory would not
-be writable.
+See [`docker-compose.yml`](docker-compose.yml). It passes the credentials and
+key through as `CUBIT_PLUXEE_USERNAME`, `CUBIT_PLUXEE_PASSWORD` and
+`CUBIT_AUTH_ENCRYPTION_KEY`, and it uses a **named volume**, not a bind mount:
+the image runs as uid 10001 and a root-owned host directory would not be
+writable. The file sets no API token; add `CUBIT_SERVER_API_TOKEN` to its
+`environment` before exposing the port, or to use `cubit-login`.
+
+## Configuration
+
+Precedence: **flags > environment > YAML file > built-in defaults.** Only flags
+you actually pass override the environment.
+
+The YAML file is read from `/config/config.yaml` by default (change it with
+`--config`); a missing file is fine, a malformed one is an error. See
+[`config/config.yaml.example`](config/config.yaml.example).
+
+Every setting has a `CUBIT_`-prefixed environment variable: the YAML key in
+upper case with dots replaced by underscores.
+
+| YAML key | Environment variable | Flag | Default | Description |
+|---|---|---|---|---|
+| `server.address` | `CUBIT_SERVER_ADDRESS` | `--address` | `:8080` | Listen address |
+| `server.api_token` | `CUBIT_SERVER_API_TOKEN` | — | — | Guards `/api/v1` and `/metrics`; at least 16 characters. Empty leaves them open |
+| `pluxee.username` | `CUBIT_PLUXEE_USERNAME` | — | — | Cibus/Pluxee username; optional if posted to the API |
+| `pluxee.password` | `CUBIT_PLUXEE_PASSWORD` | — | — | Cibus/Pluxee password; optional if posted to the API |
+| `pluxee.company` | `CUBIT_PLUXEE_COMPANY` | — | — | Only if your employer's login asks for it |
+| `pluxee.restaurant_id` | `CUBIT_PLUXEE_RESTAURANT_ID` | `--restaurant-id` | `31999` | Restaurant the report is labelled with |
+| `pluxee.timeout` | `CUBIT_PLUXEE_TIMEOUT` | — | `30s` | Per-request timeout |
+| `pluxee.language` | `CUBIT_PLUXEE_LANGUAGE` | — | `he` | `Accept-Language` sent upstream |
+| `pluxee.recaptcha_token` | `CUBIT_PLUXEE_RECAPTCHA_TOKEN` | — | — | Only if login starts demanding a captcha (see the caveat below) |
+| `pluxee.auth_base` | `CUBIT_PLUXEE_AUTH_BASE` | — | `https://api.capir.pluxee.co.il` | Pluxee authentication backend |
+| `pluxee.api_base` | `CUBIT_PLUXEE_API_BASE` | — | `https://api.consumers.pluxee.co.il/api/main.py` | Pluxee backend that serves balances |
+| `voucher.value_agorot` | `CUBIT_VOUCHER_VALUE_AGOROT` | `--voucher-value` | `5000` | Voucher denomination in agorot (₪50); must be positive |
+| `auth.autostart` | `CUBIT_AUTH_AUTOSTART` | `--autostart` | `true` | Try a login on boot when credentials are configured and no session is held |
+| `auth.otp_ttl` | `CUBIT_AUTH_OTP_TTL` | `--otp-ttl` | `5m` | How long a challenge stays valid |
+| `auth.otp_max_attempts` | `CUBIT_AUTH_OTP_MAX_ATTEMPTS` | — | `3` | Wrong codes before a fresh login is needed |
+| `auth.encryption_key` | `CUBIT_AUTH_ENCRYPTION_KEY` | — | — | **Required** (or the key file). 32 bytes, raw / hex / base64 |
+| `auth.encryption_key_file` | `CUBIT_AUTH_ENCRYPTION_KEY_FILE` | — | — | Path to a key file; wins over `auth.encryption_key` |
+| `data_dir` | `CUBIT_DATA_DIR` | `--data-dir` | `/data` | Where `token.enc` and `channels.enc` live |
+| `log.level` | `CUBIT_LOG_LEVEL` | `--log-level` | `info` | `debug`, `info`, `warning`, `error` |
+| `log.format` | `CUBIT_LOG_FORMAT` | `--log-format` | `json` | `json` or `text` |
+
+Flags without a configuration key:
+
+| Flag | Default | Purpose |
+|---|---|---|
+| `--config` | `/config/config.yaml` | YAML configuration file |
+| `--version` | — | Print the version and exit |
+| `--help` | — | Usage |
+
+Credentials are accepted from the environment or the YAML file (prefer the
+environment) — never as a command-line flag, because flags are visible in the
+process table. They may also be left unset entirely
+and posted to
+[`/api/v1/auth/credentials`](#post-apiv1authcredentials) at runtime; setting only
+one half of the pair is rejected at startup. With neither set, Cubit starts in
+`IDLE` and waits.
+
+All settings are validated at startup, so a bad value fails fast rather than on
+the first request.
 
 ## HTTP API
 
-All endpoints are JSON. Application routes live under `/api/v1`.
+The `/api/v1` endpoints are JSON. Application routes live under `/api/v1`.
 
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/api/v1/auth/credentials` | **Log in** — starts a browser-assisted login |
 | `POST` | `/api/v1/auth/otp` | Submit the OTP code, completing the login |
 | `GET`  | `/api/v1/auth/status` | Current state, challenge details, whether credentials are set |
-| `GET`  | `/api/v1/balance` | Balance and voucher calculation |
-| `GET`  | `/healthz` | Liveness |
-| `GET`  | `/readyz` | Ready only when `AUTHENTICATED` |
 | `POST` | `/api/v1/auth/logout` | End the session, at Pluxee and locally |
+| `GET`  | `/api/v1/balance` | Balance and voucher calculation |
+| `GET`  | `/api/v1/notifications` | List notification channels |
+| `POST` | `/api/v1/notifications` | Add a channel |
+| `PUT`  | `/api/v1/notifications/{id}` | Replace a channel |
+| `DELETE` | `/api/v1/notifications/{id}` | Remove a channel |
+| `POST` | `/api/v1/notifications/test` | Send a real test message without saving |
+| `GET`  | `/healthz` | Liveness; returns the version |
+| `GET`  | `/readyz` | Ready only when `AUTHENTICATED` |
 | `GET`  | `/metrics` | Prometheus |
-| `GET`  | `/api/v1/notifications` | List, add, update, delete channels |
-| `POST` | `/api/v1/notifications/test` | Send a real test message |
 | `GET`  | `/api/docs` | Swagger UI |
 
 Logging in is two calls: post your credentials, then post the code Pluxee texts
-you. Everything else the login needs happens between cubit and the `cubit-login`
+you. Everything else the login needs happens between Cubit and the `cubit-login`
 helper over endpoints that are deliberately **not** in the published spec —
 `/auth/browser`, `/auth/browser/otp`, `/auth/login-request` and `/auth/session`.
 They are machine-to-machine plumbing, and documenting them was actively
-misleading: `/auth/browser` reads like a login button but only arms cubit to
+misleading: `/auth/browser` reads like a login button but only arms Cubit to
 receive a code, sends no SMS, and blocks `/auth/credentials` while it sits
-there. `/auth/login` is likewise undocumented — Pluxee's reCAPTCHA means it can
-only ever answer `412`.
+there. `/auth/login` is likewise undocumented — because of Pluxee's reCAPTCHA,
+in practice it answers `412`.
 
 If you ever wedge the state machine, `POST /api/v1/auth/logout` resets it.
 
@@ -119,9 +318,9 @@ The UI assets are embedded in the binary rather than pulled from a CDN, so the
 docs work on a host with no outbound internet, and a page that handles
 credentials loads no third-party JavaScript.
 
-`internal/apidocs/openapi.yaml` is the committed source of truth. A test walks
-the router and fails the build if a route is added without documenting it, or
-documented without existing.
+[`internal/apidocs/openapi.yaml`](internal/apidocs/openapi.yaml) is the committed
+source of truth. A test walks the router and fails the build if a route is added
+without documenting it, or documented without existing.
 
 ### `POST /api/v1/auth/otp`
 
@@ -132,10 +331,18 @@ documented without existing.
 | Status | Meaning |
 |---|---|
 | `200` | Authenticated |
+| `202` | Code received during a browser-assisted login; `cubit-login` will complete it |
 | `400` | Malformed body or empty code |
-| `401` | Wrong code — the body carries `attempts_remaining` |
-| `409` | No OTP is pending |
+| `401` | Wrong code (the body carries `attempts_remaining`), or Pluxee rejected the login |
+| `409` | No OTP is pending, or already authenticated |
 | `410` | The challenge expired; start a new login |
+| `502` | The Pluxee backend could not be reached |
+
+### `GET /api/v1/auth/status`
+
+Returns the current `state` (`IDLE`, `AWAITING_OTP` or `AUTHENTICATED`) and,
+when relevant, `masked_target`, `delivery_method`, `attempts_remaining`,
+`challenge_expires_at`, `authenticated_at`, plus `credentials_configured`.
 
 ### `GET /api/v1/balance`
 
@@ -163,6 +370,8 @@ caller can tell whether an OTP is pending.
 { "username": "0501234567", "password": "your-cibus-password" }
 ```
 
+An optional `company` field is accepted for employers whose login asks for it.
+
 **This is how you log in.** With a `cubit-login` helper running in watch mode,
 posting credentials is the whole trigger: the helper drives a browser through
 Pluxee's login, and Pluxee texts you a code to submit to `/api/v1/auth/otp`.
@@ -178,10 +387,10 @@ Pluxee's login, and Pluxee texts you a code to submit to `/api/v1/auth/otp`.
 
 The password is never echoed back and never appears in a log line at any level.
 
-**This endpoint refuses to run on an unguarded instance.** Every other route is
-open when `CUBIT_SERVER_API_TOKEN` is unset, which is deliberate first-run
+**This endpoint refuses to run on an unguarded instance** (`412`), as do the
+`cubit-login` handoff routes. Every other public route is open when `CUBIT_SERVER_API_TOKEN` is unset, which is deliberate first-run
 behaviour, but an open endpoint that accepts the password to a financial account
-is a different proposition — anyone who can reach the port could hand cubit
+is a different proposition — anyone who can reach the port could hand Cubit
 their own credentials, and yours would cross the wire unprotected. Set a token
 first.
 
@@ -212,9 +421,10 @@ Cubit reports every run to channels you configure. Three providers:
 |---|---|
 | `shoutrrr` | One `url` — Slack, Discord, Telegram, Gotify, SMTP, ntfy and more |
 | `greenapi` | `instance_id`, `token`, `phone`, optional `api_url` |
-| `whatsapp_web` | `base_url`, `phone`, optional `username`/`password` |
+| `whatsapp_web` | `base_url`, `phone`, optional `username`/`password` ([go-whatsapp-web-multidevice](https://github.com/aldinokemal/go-whatsapp-web-multidevice)) |
 
-Add one:
+Each channel also has `name`, `enabled`, `notify_on_success` and
+`notify_on_failure`. Add one:
 
 ```bash
 curl -X POST http://cubit:8080/api/v1/notifications \
@@ -234,21 +444,25 @@ curl -X POST http://cubit:8080/api/v1/notifications \
       }'
 ```
 
+A Shoutrrr channel uses `"shoutrrr": {"url": "telegram://token@telegram?chats=@channel"}`,
+and a WhatsApp Web one uses `"whatsapp_web": {"base_url": "...", "phone": "..."}`.
+
 `POST /api/v1/notifications/test` sends a real message using the values in the
 request **without saving them**, so a configuration can be checked before it is
 stored.
 
 **GreenAPI notes**, which account for most of its opaque `400`s: the phone is
 international format with digits only — `972501234567`, not `+972 50 1234567` —
-and every field is trimmed, because whitespace in a token or instance id
+and every field is trimmed, because whitespace in a token or instance ID
 corrupts the request URL. Leave `api_url` empty for the default host; set it if
 your console shows a cluster such as `https://7103.api.greenapi.com`.
 
 ### When they fire
 
 After every balance check. A success goes to channels with
-`notify_on_success`, a failure to those with `notify_on_failure`. **A completed
-login triggers a check by itself**, so the whole flow is:
+`notify_on_success`, a failure to those with `notify_on_failure`. **A login
+completed by `cubit-login` triggers a check by itself** (when the helper hands
+over the session), so the whole flow is:
 
 ```
 POST /api/v1/auth/credentials   →  helper logs in, Pluxee texts you
@@ -261,83 +475,15 @@ logged and never costs you a balance read.
 
 ### At rest
 
-Channels live in `${DATA_DIR}/channels.enc`, AES-256-GCM under the same key as
-the session. Credentials are redacted in every API response — you can see that a
-token is set, never what it is — and never appear in a log line. Persist that
-volume: it holds your provider tokens as well as the session.
-
-## Configuration
-
-Precedence: **flags > environment > YAML file > built-in defaults.**
-
-The YAML file is read from `/config/config.yaml` by default; see
-[`config/config.yaml.example`](config/config.yaml.example).
-
-### Environment variables
-
-Every setting has a `CUBIT_`-prefixed variable: the config key with dots
-replaced by underscores.
-
-| Variable | Default | Purpose |
-|---|---|---|
-| `CUBIT_PLUXEE_USERNAME` | — | Cibus/Pluxee username; optional if posted to the API |
-| `CUBIT_PLUXEE_PASSWORD` | — | Cibus/Pluxee password; optional if posted to the API |
-| `CUBIT_AUTH_ENCRYPTION_KEY` | — | **Required.** 32 bytes, raw / hex / base64 |
-| `CUBIT_AUTH_ENCRYPTION_KEY_FILE` | — | Path to a key file; wins over the above |
-| `CUBIT_PLUXEE_COMPANY` | — | Only if your employer's login asks for it |
-| `CUBIT_PLUXEE_RESTAURANT_ID` | `31999` | Restaurant the report is labelled with |
-| `CUBIT_PLUXEE_TIMEOUT` | `30s` | Per-request timeout |
-| `CUBIT_PLUXEE_LANGUAGE` | `he` | `Accept-Language` sent upstream |
-| `CUBIT_PLUXEE_RECAPTCHA_TOKEN` | — | Only if login starts demanding a captcha |
-| `CUBIT_VOUCHER_VALUE_AGOROT` | `5000` | Voucher denomination (₪50) |
-| `CUBIT_AUTH_AUTOSTART` | `true` | Begin login on boot |
-| `CUBIT_AUTH_OTP_TTL` | `5m` | How long a challenge stays valid |
-| `CUBIT_AUTH_OTP_MAX_ATTEMPTS` | `3` | Wrong codes before a fresh login is needed |
-| `CUBIT_SERVER_API_TOKEN` | — | Guards `/api/v1` and `/metrics`; min 16 chars |
-| `CUBIT_SERVER_ADDRESS` | `:8080` | Listen address |
-| `CUBIT_DATA_DIR` | `/data` | Where the encrypted session lives |
-| `CUBIT_LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` |
-| `CUBIT_LOG_FORMAT` | `json` | `json` or `text` |
-
-Credentials are accepted from the environment or a mounted file only — never as
-a command-line flag, because flags are visible in the process table. They may
-also be left unset entirely and posted to
-[`/api/v1/auth/credentials`](#post-apiv1authcredentials) at runtime; setting only
-one half of the pair is rejected at startup. With neither set, cubit starts in
-`IDLE` and waits.
-
-### CLI flags
-
-| Flag | Default | Purpose |
-|---|---|---|
-| `--config` | `/config/config.yaml` | YAML configuration file |
-| `--address` | `:8080` | Listen address |
-| `--data-dir` | `/data` | Encrypted session directory |
-| `--voucher-value` | `5000` | Voucher denomination in agorot |
-| `--restaurant-id` | `31999` | Restaurant to price against |
-| `--autostart` | `true` | Begin login on boot |
-| `--otp-ttl` | `5m` | Challenge lifetime |
-| `--log-level` | `info` | Log level |
-| `--log-format` | `json` | Log format |
-| `--version` | — | Print the version and exit |
-| `--help` | — | Usage |
-
-## The voucher maths
-
-All money is `int64` **agorot** — never `float64`. The API's decimal string is
-converted to integers once, at the client boundary, by parsing its digits: `1.15`
-is exactly `115` agorot, whereas `1.15 * 100` in binary floating point is
-`114.99999999999999`.
-
-```
-vouchers  = balance / voucherValue   (integer division)
-remainder = balance % voucherValue
-```
-
-A zero or negative balance buys nothing and is not an error. A non-positive
-denomination is rejected at startup rather than dividing by zero later.
+Channels live in `${CUBIT_DATA_DIR}/channels.enc`, AES-256-GCM under the same key
+as the session. Credentials are redacted in every API response — you can see
+that a token is set, never what it is — and never appear in a log line. Persist
+that volume: it holds your provider tokens as well as the session.
 
 ## Metrics
+
+Served at `/metrics` (guarded by the API token when one is set). Besides the
+standard Go and process collectors:
 
 | Metric | Type | Meaning |
 |---|---|---|
@@ -345,10 +491,22 @@ denomination is rejected at startup rather than dividing by zero later.
 | `cubit_vouchers_affordable` | gauge | Vouchers the last balance covered |
 | `cubit_remainder_agorot` | gauge | Leftover after those vouchers |
 | `cubit_last_balance_check_timestamp_seconds` | gauge | Last successful check |
-| `cubit_balance_checks_total` | counter | By `result` |
-| `cubit_auth_state` | gauge | One series per state; exactly one is `1` |
-| `cubit_otp_submissions_total` | counter | By `result` |
-| `cubit_logins_total` | counter | By `result` |
+| `cubit_balance_checks_total` | counter | By `result` (`success`, `error`) |
+| `cubit_auth_state` | gauge | One series per `state`; exactly one is `1` |
+| `cubit_otp_submissions_total` | counter | By `result` (`accepted`, `rejected`) |
+| `cubit_logins_total` | counter | By `result` (`success`, `error`) |
+
+A Prometheus scrape job for a token-protected instance can use basic auth:
+
+```yaml
+scrape_configs:
+  - job_name: cubit
+    basic_auth:
+      username: cubit
+      password: <token>
+    static_configs:
+      - targets: ["cubit:8080"]
+```
 
 ## Authentication
 
@@ -360,7 +518,8 @@ curl -H 'X-API-Token: <token>'   http://localhost:8080/api/v1/balance
 curl -u cubit:<token>            http://localhost:8080/api/v1/balance
 ```
 
-Comparison is constant-time. `/healthz` and `/readyz` stay open for probes.
+With basic auth only the password is checked; the username is ignored.
+Comparison is constant-time. `/healthz`, `/readyz` and `/api/docs` stay open.
 
 **If you do not set a token the API is open**, and Cubit warns about it on every
 start. That is deliberate first-run behaviour — the service has to be reachable
@@ -368,61 +527,60 @@ before it is configured — but an open instance lets anyone who can reach the p
 read your balance and make Pluxee send *you* an OTP. Set a token before exposing
 it beyond localhost.
 
-## Security
-
-- Credentials, OTP codes and session tokens are **never logged** at any level,
-  and are never echoed in an API response. Redaction happens at the logging
-  boundary.
-- The session is stored **AES-256-GCM encrypted**, file mode `0600`, written
-  atomically.
-- The container runs as **uid 10001** on `scratch`: no shell, no package
-  manager, no libc.
-- A rejected login is **never retried**. This talks to a real financial account,
-  and a retry loop risks a lockout. Backoff with jitter applies only to `429`
-  and `5xx`, capped at three attempts, honouring `Retry-After`.
-- OTP submissions are capped (default 3) before a fresh login is required.
-- Because the token is required as a header (or basic-auth), a configured token
-  also closes the cross-site request path that could otherwise make a browser
-  trigger a login.
-- `go.mod` requires Go 1.25.13 or newer, the release that fixed the standard
-  library advisories `govulncheck` reports against older toolchains.
-
 ## Re-authenticating with `cubit-login`
 
-Because Pluxee enforces reCAPTCHA, cubit cannot start a login on its own. The
+Because Pluxee enforces reCAPTCHA, Cubit cannot start a login on its own. The
 `cubit-login` helper does it with a real browser and hands the resulting session
-over. You need this only when the stored session finally expires.
+over. You need this for the first login and whenever the stored session finally
+expires.
 
-```
-cubit-login --url https://cubit.home --token "$CUBIT_SERVER_API_TOKEN" \
-            --username 0501234567
-```
+There are two ways to run it:
 
-The password comes from `CUBIT_PLUXEE_PASSWORD` or an interactive prompt, never
-a flag — flags are visible in the process table.
+- **Watch mode** (`--watch`): stays running beside Cubit and logs in whenever
+  credentials are posted to `/api/v1/auth/credentials`. It needs only the API
+  token; the credentials come from Cubit. A failed attempt is logged and the
+  helper keeps waiting — the next post is the retry.
+- **One-shot**: logs in once with the credentials you give it.
+
+  ```
+  cubit-login --url https://cubit.home --token "$CUBIT_SERVER_API_TOKEN" \
+              --username 0501234567
+  ```
+
+  The password comes from `CUBIT_PLUXEE_PASSWORD` or an interactive prompt,
+  never a flag — flags are visible in the process table.
 
 What happens:
 
 1. The helper drives a Chrome you already have installed (it bundles none) and
    signs in. The browser solves the captcha the ordinary way.
 2. Pluxee sends the one-time code to your phone.
-3. The helper tells cubit to expect it, and cubit accepts it on the usual
+3. The helper tells Cubit to expect it, and Cubit accepts it on the usual
    `POST /api/v1/auth/otp`. **If you have an app that auto-forwards the SMS to
    that endpoint, nobody types anything.** Otherwise post it yourself.
-4. The helper collects the code from cubit — once — enters it in the browser,
+4. The helper collects the code from Cubit — once — enters it in the browser,
    and hands the resulting session to `POST /api/v1/auth/session`.
 5. Cubit checks the session works, stores it encrypted, and is authenticated.
 
 | Flag | Purpose |
 |---|---|
-| `--url` | Base URL of the running cubit (default `http://127.0.0.1:8080`) |
+| `--url` | Base URL of the running Cubit (default `http://127.0.0.1:8080`) |
 | `--token` | Cubit API token, or `CUBIT_SERVER_API_TOKEN` |
-| `--username` | Cibus username, or `CUBIT_PLUXEE_USERNAME` |
+| `--username` | Cibus username, or `CUBIT_PLUXEE_USERNAME` (one-shot mode) |
+| `--watch` | Stay running and log in whenever credentials are posted to Cubit |
 | `--otp-timeout` | How long to wait for the code (default `5m`) |
-| `--poll-interval` | How often to ask cubit for it (default `2s`) |
-| `--chrome` | Path to a Chrome/Chromium binary |
+| `--poll-interval` | How often to ask Cubit for it (default `2s`) |
+| `--chrome` | Path to a Chrome/Chromium binary (default: found on `PATH`) |
 | `--headful` | Show the browser, for when the page changes and a step stops matching |
-| `--print` | Print the session instead of sending it, for when the helper cannot reach cubit |
+| `--no-sandbox` | Disable Chrome's sandbox; needed only when running as root, e.g. in a container |
+| `--print` | Print the session instead of sending it, for when the helper cannot reach Cubit |
+| `--version` | Print the version and exit |
+
+With `--print` the helper asks for the code on the terminal and writes the
+session as JSON to stdout. Its progress lines also go to stdout, so strip them
+before reusing the JSON. That output is a **live session**: post it to
+`/api/v1/auth/session` and then discard it. `--print` is ignored in `--watch`
+mode.
 
 ### How long it takes
 
@@ -448,18 +606,53 @@ Every step waits for the page to be ready rather than sleeping for a fixed
 guess, so a slow day costs a little more and a fast one costs less, instead of
 always costing the worst case.
 
-The helper is **not** in the container image — it needs a browser, and cubit
-stays a static binary on `scratch`. It ships as a separate release archive for
-linux, macOS and Windows on amd64 and arm64.
-
 The browser-handoff endpoints refuse to run unless `CUBIT_SERVER_API_TOKEN` is
 set: a session cookie is as good as the password.
+
+## The voucher maths
+
+All money is `int64` **agorot** — never `float64`. The API's decimal string is
+converted to integers once, at the client boundary, by parsing its digits: `1.15`
+is exactly `115` agorot, whereas `1.15 * 100` in binary floating point is
+`114.99999999999999`.
+
+```
+vouchers  = balance / voucherValue   (integer division)
+remainder = balance % voucherValue
+```
+
+A zero or negative balance buys nothing and is not an error. A non-positive
+denomination is rejected at startup rather than dividing by zero later.
+
+## Security
+
+- Credentials, OTP codes and session tokens are **never logged** at any level,
+  and are never echoed in an API response: they are simply never passed to the
+  logger. The startup configuration dump masks secrets as `<set>`/`<unset>`.
+- The session is stored **AES-256-GCM encrypted**, file mode `0600`, written
+  atomically.
+- The container runs as **uid 10001** on `scratch`: no shell, no package
+  manager, no libc.
+- A rejected login is **never retried**. This talks to a real financial account,
+  and a retry loop risks a lockout. Backoff with jitter applies only to `429`
+  and `5xx`, capped at three attempts, honouring `Retry-After`.
+- OTP submissions are capped (default 3) before a fresh login is required, for
+  direct logins; in the browser-assisted flow the code is only parked for
+  `cubit-login`.
+- When clients present the token in the `X-API-Token` header, a configured
+  token also closes the cross-site request path that could otherwise make a
+  browser trigger a login. Basic-auth credentials cached by a browser are sent
+  cross-site, so prefer the header for browser-reachable instances.
+- In watch mode `cubit-login` receives your password and the OTP from Cubit,
+  and in every mode it sends the session cookies back. Run the helper on the
+  same host, or put Cubit behind TLS when the helper connects over a network.
+- `go.mod` declares Go 1.26.0, and the Docker build uses `golang:1.26-alpine`.
 
 ## A caveat worth reading
 
 Pluxee's API is undocumented. Cubit's understanding of it came from reading the
-shipped web app and probing the live endpoints; the notes are in
-`docs/api-notes.md` (kept out of git as a local working document).
+shipped web app and probing the live endpoints; those notes are a local
+working document and are not part of the repository.
 
 **One finding governs how Cubit can be operated: the login endpoint enforces
 reCAPTCHA.** This was confirmed on 2026-09-09 against a real account. The same
@@ -475,7 +668,7 @@ it is read.
 
 **So Cubit cannot log in unattended.** What it does instead:
 
-- A session, once obtained, is held and re-used — encrypted at rest in
+- A session, once obtained, is held and reused — encrypted at rest in
   `token.enc`. Day to day, restarts need no OTP and no captcha.
 - Re-authentication, when a session finally expires, is a manual act performed
   with a browser.
@@ -484,7 +677,28 @@ it is read.
 
 Cubit does not solve, bypass, or outsource captchas.
 
-## Building
+## Troubleshooting
+
+- **`412` from `/api/v1/auth/credentials`** — no API token is configured. Set
+  `CUBIT_SERVER_API_TOKEN` (at least 16 characters) and restart.
+- **`412` when logging in without the helper** — Pluxee wants a captcha. Use
+  `cubit-login`.
+- **Startup fails with an encryption-key error** — the key must decode to
+  exactly 32 bytes: 32 raw characters, 64 hex characters, or the base64 of 32
+  bytes.
+- **Startup fails with "required alongside"** — only one of the username and
+  password is set. Set both, or neither.
+- **Every restart needs a new code** — the data volume is not persisted, or the
+  encryption key changed between runs.
+- **Cannot write the session with a bind mount** — the container runs as uid
+  10001. Use a named volume, or give that uid ownership of the host directory.
+- **The state machine is stuck** — `POST /api/v1/auth/logout` resets it to
+  `IDLE`.
+- **`cubit-login` fails on a changed Pluxee page** — rerun with `--headful` to
+  watch where it stops. When running as root (for example in a container), add
+  `--no-sandbox`.
+
+## Development
 
 ```bash
 go test ./...
@@ -499,9 +713,52 @@ export CUBIT_AUTH_ENCRYPTION_KEY="$(head -c 32 /dev/urandom | base64)"
 ./scripts/dev.sh
 ```
 
-Releases are `workflow_dispatch` only and versioned `YYYY.M.PATCH`. The Release
-workflow builds every target with goreleaser; a separate Docker workflow
-publishes `linux/amd64`, `linux/arm64` and `linux/arm/v7` images.
+`scripts/dev.sh` requires those three variables, stores data in `./data`, logs
+as `text` at `debug`, and reads `./config/config.yaml` (override with
+`CUBIT_CONFIG`). Extra arguments are passed to `cubit`.
+
+### Project layout
+
+```
+cmd/cubit/            the service
+cmd/cubit-login/      browser-assisted login helper (chromedp)
+internal/api/         HTTP router, handlers, auth middleware
+internal/apidocs/     embedded Swagger UI and openapi.yaml
+internal/config/      settings, loading and validation
+internal/crypt/       shared AES-256-GCM helpers
+internal/metrics/     Prometheus metrics
+internal/notify/      notification channels, store and senders
+internal/pluxee/      Pluxee API client
+internal/session/     login state machine, encrypted session store
+internal/voucher/     voucher calculation
+internal/version/     build-time version
+config/               example configuration
+scripts/              dev.sh, next-version.sh
+```
+
+### Releases
+
+Releases are `workflow_dispatch` only and versioned `YYYY.M.PATCH`
+(`scripts/next-version.sh`). The Release workflow runs the tests, tags the
+version and builds with GoReleaser:
+
+- `cubit` for Linux (amd64, arm64, armv6, armv7, 386), macOS (amd64, arm64) and
+  Windows (amd64, arm64);
+- `cubit-login` for Linux, macOS and Windows on amd64 and arm64.
+
+A separate Docker workflow, triggered by a successful Release or run by hand,
+publishes `linux/amd64`, `linux/arm64` and `linux/arm/v7` images to Docker Hub
+as `<DOCKERHUB_USERNAME>/cubit` — the namespace comes from that repository
+secret, while `docker-compose.yml` expects `techblog/cubit`.
+A manual "Publish to GHCR" workflow can push the same platforms to
+`ghcr.io/t0mer/cubit`.
+
+## Contributing
+
+Issues and pull requests are welcome. Please run `go test ./...` before opening
+a PR, and keep `internal/apidocs/openapi.yaml` in step with any route you add or
+remove — the tests enforce it. Never include real credentials, OTP codes or
+session data in issues, logs or test fixtures.
 
 ## Licence
 
